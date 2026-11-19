@@ -567,7 +567,11 @@ class ApiStack(cdk.Stack):
             ),
             account_recovery=cognito.AccountRecovery.NONE,
             mfa=cognito.Mfa.OPTIONAL,
-            removal_policy=RemovalPolicy.RETAIN,
+            removal_policy=(
+                RemovalPolicy.DESTROY
+                if self.node.try_get_context("ephemeral") == "true"
+                else RemovalPolicy.RETAIN
+            ),
         )
 
         # App Client — SPA flow, no secret

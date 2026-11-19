@@ -15,6 +15,8 @@ import aws_cdk as cdk
 from aws_cdk import (
     CfnOutput,
     Duration,
+    RemovalPolicy,
+    aws_logs as logs,
     aws_events as events,
     aws_lambda as lambda_,
     aws_iam as iam,
@@ -42,6 +44,16 @@ class TestToolsStack(cdk.Stack):
         # CTRL-03: IAM least privilege — sqs:SendMessage on ingestion queue.
         # CTRL-05: Function name contains 'test'.
         # ---------------------------------------------------------------
+        # Ephemeral only: stack-managed log group so `cdk destroy` removes it.
+        generator_log_group = None
+        if self.node.try_get_context("ephemeral") == "true":
+            generator_log_group = logs.LogGroup(
+                self, "EventGeneratorLogGroup",
+                log_group_name="/aws/lambda/compass-test-event-generator",
+                retention=logs.RetentionDays.ONE_MONTH,
+                removal_policy=RemovalPolicy.DESTROY,
+            )
+
         self.generator_fn = lambda_.Function(
             self, "EventGenerator",
             function_name="compass-test-event-generator",
@@ -53,6 +65,7 @@ class TestToolsStack(cdk.Stack):
             environment={
                 "INGESTION_QUEUE_URL": ingestion_queue_url,
             },
+            log_group=generator_log_group,
         )
 
         # CTRL-03: sqs:SendMessage on the ingestion queue.
