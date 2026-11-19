@@ -233,7 +233,10 @@ def handle_campaigns_list(event, context):
     try:
         table = _dynamodb.Table(CAMPAIGNS_TABLE)
         resp = table.scan()
-        items = resp.get("Items", [])
+        items = list(resp.get("Items", []))
+        while "LastEvaluatedKey" in resp:
+            resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"])
+            items.extend(resp.get("Items", []))
     except ClientError:
         logger.exception("Failed to scan CampaignsTable")
         return _error(500, "SYS_INTERNAL_ERROR", "Failed to read campaigns.")

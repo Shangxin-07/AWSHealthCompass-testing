@@ -265,61 +265,120 @@ def _get_jira_client() -> JiraClient:
 # ===================================================================
 
 
-def _build_ticket_index() -> Dict[str, Dict[str, str]]:
-    """Scan ResourcesTable for items with ticketId → in-memory index.
+# ticketStatus values that denote a ticketed item. Untouched items carry
+# "none" and are deliberately excluded: they make up the bulk of the table.
+_TICKETED_STATUSES = ("Created", "In Progress", "Closed", "unknown")
+_BATCH_GET_SIZE = 100
+_BATCH_GET_MAX_RETRIES = 5
+_INDEX_PROJECTION = (
+    "campaignId, trackingKey, ticketId, ticketStatus, "
+    "ticketRawStatus, ticketPlatform, tickets"
+)
+
+
+def _index_item(index: Dict[str, Dict[str, str]], item: Dict[str, Any]) -> None:
+    """Add one ResourcesTable item's ticket(s) to the in-memory index.
 
     Reads from `tickets` map (dual-platform) with flat-field fallback
     for backward compatibility with legacy items.
+    """
+    campaign_id = item.get("campaignId", "")
+    tracking_key = item.get("trackingKey", "")
 
-    Returns dict: ticketId → {campaignId, trackingKey, platform, ticketStatus, ticketRawStatus}.
+    tickets_map = item.get("tickets")
+    if isinstance(tickets_map, dict) and tickets_map:
+        for platform, ticket_data in tickets_map.items():
+            if not isinstance(ticket_data, dict):
+                continue
+            ticket_id = ticket_data.get("ticketId")
+            if ticket_id and isinstance(ticket_id, str):
+                index[ticket_id] = {
+                    "campaignId": campaign_id,
+                    "trackingKey": tracking_key,
+                    "platform": platform,
+                    "ticketStatus": ticket_data.get("ticketStatus"),
+                    "ticketRawStatus": ticket_data.get("ticketRawStatus"),
+                }
+    else:
+        ticket_id = item.get("ticketId")
+        if ticket_id and isinstance(ticket_id, str):
+            index[ticket_id] = {
+                "campaignId": campaign_id,
+                "trackingKey": tracking_key,
+                "platform": item.get("ticketPlatform", "jira"),
+                "ticketStatus": item.get("ticketStatus"),
+                "ticketRawStatus": item.get("ticketRawStatus"),
+            }
+
+
+def _list_ticketed_keys() -> List[Dict[str, str]]:
+    """Query ticketStatus-index (KEYS_ONLY) for every ticketed item's key.
+
+    Avoids a full-table scan: only items with a real ticket status are read.
+    """
+    keys: List[Dict[str, str]] = []
+    seen = set()
+    for status in _TICKETED_STATUSES:
+        query_kwargs: Dict[str, Any] = {
+            "IndexName": "ticketStatus-index",
+            "KeyConditionExpression": "ticketStatus = :s",
+            "ExpressionAttributeValues": {":s": status},
+        }
+        while True:
+            resp = _resources_table.query(**query_kwargs)
+            for item in resp.get("Items", []):
+                k = (item.get("campaignId"), item.get("trackingKey"))
+                if k[0] and k[1] and k not in seen:
+                    seen.add(k)
+                    keys.append({"campaignId": k[0], "trackingKey": k[1]})
+            if "LastEvaluatedKey" not in resp:
+                break
+            query_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    return keys
+
+
+def _batch_get_items(keys: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    """BatchGetItem in chunks of 100, retrying UnprocessedKeys with backoff."""
+    table_name = _resources_table.name
+    items: List[Dict[str, Any]] = []
+    for i in range(0, len(keys), _BATCH_GET_SIZE):
+        request = {
+            table_name: {
+                "Keys": keys[i:i + _BATCH_GET_SIZE],
+                "ProjectionExpression": _INDEX_PROJECTION,
+            }
+        }
+        attempt = 0
+        while request:
+            resp = _resources_table.meta.client.batch_get_item(RequestItems=request)
+            items.extend(resp.get("Responses", {}).get(table_name, []))
+            request = resp.get("UnprocessedKeys") or None
+            if request:
+                attempt += 1
+                if attempt > _BATCH_GET_MAX_RETRIES:
+                    raise ClientError(
+                        {"Error": {
+                            "Code": "ProvisionedThroughputExceededException",
+                            "Message": "batch_get_item: unprocessed keys after retries",
+                        }},
+                        "BatchGetItem",
+                    )
+                time.sleep(min(0.1 * (2 ** attempt), 2.0))
+    return items
+
+
+def _build_ticket_index() -> Dict[str, Dict[str, str]]:
+    """Build ticketId -> metadata index from ResourcesTable.
+
+    Uses the ticketStatus-index GSI to locate ticketed items, then
+    BatchGetItem for their full attributes, instead of scanning the entire
+    table (which grows with every resource across every account).
+
+    Returns dict: ticketId -> {campaignId, trackingKey, platform, ticketStatus, ticketRawStatus}.
     """
     index: Dict[str, Dict[str, str]] = {}
-    scan_kwargs: Dict[str, Any] = {
-        "FilterExpression": "attribute_exists(ticketId) AND ticketId <> :null",
-        "ExpressionAttributeValues": {":null": None},
-        "ProjectionExpression": (
-            "campaignId, trackingKey, ticketId, ticketStatus, "
-            "ticketRawStatus, ticketPlatform, tickets"
-        ),
-    }
-
-    while True:
-        resp = _resources_table.scan(**scan_kwargs)
-        for item in resp.get("Items", []):
-            campaign_id = item.get("campaignId", "")
-            tracking_key = item.get("trackingKey", "")
-
-            # Primary path: iterate tickets map for multi-platform entries
-            tickets_map = item.get("tickets")
-            if isinstance(tickets_map, dict) and tickets_map:
-                for platform, ticket_data in tickets_map.items():
-                    if not isinstance(ticket_data, dict):
-                        continue
-                    ticket_id = ticket_data.get("ticketId")
-                    if ticket_id and isinstance(ticket_id, str):
-                        index[ticket_id] = {
-                            "campaignId": campaign_id,
-                            "trackingKey": tracking_key,
-                            "platform": platform,
-                            "ticketStatus": ticket_data.get("ticketStatus"),
-                            "ticketRawStatus": ticket_data.get("ticketRawStatus"),
-                        }
-            else:
-                # Fallback: read flat fields for items without tickets map
-                ticket_id = item.get("ticketId")
-                if ticket_id and isinstance(ticket_id, str):
-                    index[ticket_id] = {
-                        "campaignId": campaign_id,
-                        "trackingKey": tracking_key,
-                        "platform": item.get("ticketPlatform", "jira"),
-                        "ticketStatus": item.get("ticketStatus"),
-                        "ticketRawStatus": item.get("ticketRawStatus"),
-                    }
-
-        if "LastEvaluatedKey" not in resp:
-            break
-        scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
-
+    for item in _batch_get_items(_list_ticketed_keys()):
+        _index_item(index, item)
     return index
 
 

@@ -123,7 +123,8 @@ class CoreStack(cdk.Stack):
         self.ingestion_queue = sqs.Queue(
             self, "IngestionQueue",
             queue_name="compass-ingestion",
-            visibility_timeout=Duration.seconds(900),
+            # Processor Lambda timeout is 15 min; AWS recommends >= 6x so slow runs are not redelivered mid-flight.
+            visibility_timeout=Duration.minutes(90),
             enforce_ssl=True,
             encryption=sqs.QueueEncryption.SQS_MANAGED,
             dead_letter_queue=sqs.DeadLetterQueue(
