@@ -8,6 +8,17 @@ same resolve_core functions. Zero duplicated business logic.
 Triggers:
   - Amazon EventBridge schedule rule: cron(0 2 * * ? *)  (daily at 02:00 UTC)
   - Async AWS Lambda invoke from API Lambda: POST /api/reconcile
+  - Async self-invoke (source=reconciliation-continuation) when a run is
+    about to exhaust its time budget — see "Time budget & continuation".
+
+Time budget & continuation:
+  Events are processed in a deterministic order (sorted by event ARN).
+  When fewer than _TIME_BUDGET_MARGIN_MS remain, the run checkpoints its
+  counters and a cursor (last fully processed event ARN) into
+  RECONCILE_STATE and re-invokes itself asynchronously, so large
+  organizations (hundreds of accounts / many events) finish across several
+  invocations instead of timing out. Per-event processing is idempotent, so
+  a crash or a failed hand-off only means the next run re-does some work.
 
 SECURITY CONSTRAINTS (IMPL-026-02 / IMPL-026-04 / IMPL-026-05):
 - Do NOT log raw Health API responses (contain resource ARNs, account IDs)
@@ -27,6 +38,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -70,7 +82,16 @@ _AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 
 _DEFAULT_LOOKBACK_HOURS = 48
 _MAX_LOOKBACK_HOURS = 168  # IMPL-026-07: 7-day upper bound
-_STALE_GUARD_MINUTES = 15
+# Must exceed the Lambda timeout (15 min) so a live run is never judged stale.
+_STALE_GUARD_MINUTES = 20
+# Hand off to a continuation when less than this much time remains. Must
+# cover the slowest single event (entity pagination for an org-wide event).
+_TIME_BUDGET_MARGIN_MS = 150_000
+# Upper bound on chained continuations (runaway protection); a daily run
+# at 15 min/hop could cover ~6h of work at the default.
+_MAX_CONTINUATIONS = 24
+_CONTINUATION_SOURCE = "reconciliation-continuation"
+_RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9-]{8,64}$")
 _MAX_ERROR_DETAILS = 20
 _MAX_LOG_VALUE_LEN = 512
 _MAX_EVENT_ARN_LEN = 2048
@@ -89,6 +110,8 @@ _ERR_CAMPAIGN_WRITE_FAILED = "DYNAMO_WRITE_FAILED"
 _ERR_SNS_PUBLISH_FAILED = "SNS_PUBLISH_FAILED"
 _ERR_EVENT_VALIDATION_FAILED = "PROC_EVENT_VALIDATION_FAILED"
 _ERR_GUARD_CONFLICT = "SYS_RECONCILIATION_IN_PROGRESS"
+_ERR_CONTINUATION_FAILED = "SYS_RECONCILIATION_CONTINUATION_FAILED"
+_ERR_CONTINUATION_LIMIT = "SYS_RECONCILIATION_CONTINUATION_LIMIT"
 
 # Allowed config prefixes (same as Processor — SEC-S011-14)
 _BLOCKED_CONFIG_PREFIXES = ("JIRA_", "SNOW_", "TELEMETRY")
@@ -101,6 +124,7 @@ _resources_table = _dynamodb.Table(_RESOURCES_TABLE)
 _config_table = _dynamodb.Table(_CONFIG_TABLE)
 _sns_client = boto3.client("sns", region_name=_AWS_REGION)
 _s3_client = boto3.client("s3", region_name=_AWS_REGION)
+_lambda_client = boto3.client("lambda", region_name=_AWS_REGION)
 
 # Health API client — us-east-1 only
 _health_client = boto3.client(
@@ -160,44 +184,199 @@ def _validate_service(service: Any) -> Optional[str]:
 # ===================================================================
 
 
-def _acquire_guard(now_iso: str) -> bool:
+def _progress_item(
+    run_id: str,
+    status: str,
+    trigger: str,
+    started_at: str,
+    now_iso: str,
+    counters: dict,
+    error_details: list,
+    cursor: str = "",
+    depth: int = 0,
+    lookback_start: str = "",
+) -> dict:
+    """RECONCILE_STATE item for a run in progress (aggregate data only)."""
+    return {
+        "pk": "RECONCILE_STATE",
+        "status": status,
+        "trigger": trigger,
+        "run_id": run_id,
+        "started_at": started_at,
+        "updated_at": now_iso,
+        "cursor": cursor,
+        "depth": depth,
+        "lookback_start": lookback_start,
+        "events_found": counters.get("events_found", 0),
+        "events_ingested": counters.get("events_ingested", 0),
+        "events_updated": counters.get("events_updated", 0),
+        "events_skipped": counters.get("events_skipped", 0),
+        "errors": counters.get("errors", 0),
+        "error_details": error_details[:_MAX_ERROR_DETAILS],
+    }
+
+
+def _acquire_guard(
+    now_iso: str,
+    run_id: str = "",
+    continuation: Optional[dict] = None,
+) -> bool:
     """Acquire reconciliation guard via DynamoDB conditional write.
 
+    Fresh run: succeeds if no state exists, the last run is not "running",
+    or the running run has not heartbeated within the stale threshold
+    (crash recovery).
+
+    Continuation: succeeds only if the stored state is still "running" and
+    owned by the same run_id — so a forged, duplicated or late continuation
+    cannot hijack or double-run a different run.
+
     Returns True if acquired, False if another run is active.
-    Uses 15-minute stale threshold for crash recovery (Design).
     """
     stale_threshold = (
         datetime.now(timezone.utc) - timedelta(minutes=_STALE_GUARD_MINUTES)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    try:
-        _config_table.put_item(
-            Item={
-                "pk": "RECONCILE_STATE",
-                "status": "running",
-                "started_at": now_iso,
-                "updated_at": now_iso,
-            },
-            ConditionExpression=(
+    if continuation is None:
+        item = _progress_item(
+            run_id, "running", "", now_iso, now_iso, {}, [],
+        )
+        kwargs: dict[str, Any] = {
+            "ConditionExpression": (
                 "attribute_not_exists(pk) "
                 "OR #s <> :running "
-                "OR started_at < :stale"
+                "OR updated_at < :stale"
             ),
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={
+            "ExpressionAttributeNames": {"#s": "status"},
+            "ExpressionAttributeValues": {
                 ":running": "running",
                 ":stale": stale_threshold,
             },
+        }
+    else:
+        item = _progress_item(
+            run_id, "running", continuation["trigger"],
+            continuation["started_at"], now_iso,
+            continuation["counters"], continuation["error_details"],
+            continuation["cursor"], continuation["depth"],
+            continuation["lookback_start"],
         )
+        kwargs = {
+            "ConditionExpression": "#s = :running AND run_id = :rid",
+            "ExpressionAttributeNames": {"#s": "status"},
+            "ExpressionAttributeValues": {
+                ":running": "running",
+                ":rid": run_id,
+            },
+        }
+
+    try:
+        _config_table.put_item(Item=item, **kwargs)
         return True
     except ClientError as e:
         if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
             logger.warning(
                 "Reconciliation guard conflict — "
-                "error_code=%s", _ERR_GUARD_CONFLICT,
+                "error_code=%s continuation=%s",
+                _ERR_GUARD_CONFLICT, continuation is not None,
             )
             return False
         raise
+
+
+def _parse_continuation(event: Any) -> Optional[dict]:
+    """Validate a continuation payload. Returns None if absent or invalid.
+
+    Everything is re-validated: the payload is only a hint, ownership is
+    enforced by the run_id condition in _acquire_guard.
+    """
+    if not isinstance(event, dict) or event.get("source") != _CONTINUATION_SOURCE:
+        return None
+    try:
+        run_id = event.get("runId")
+        if not isinstance(run_id, str) or not _RUN_ID_PATTERN.match(run_id):
+            return None
+        cursor = event.get("cursor", "")
+        if cursor:
+            cursor = _validate_event_arn(cursor)
+            if cursor is None:
+                return None
+        depth = int(event.get("depth", 0))
+        if not 0 <= depth <= _MAX_CONTINUATIONS:
+            return None
+        lookback_start = event.get("lookbackStart", "")
+        datetime.strptime(lookback_start, "%Y-%m-%dT%H:%M:%SZ")
+        started_at = event.get("startedAt", "")
+        datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ")
+        raw = event.get("counters") or {}
+        counters = {
+            k: max(0, int(raw.get(k, 0)))
+            for k in ("events_found", "events_ingested", "events_updated",
+                      "events_skipped", "errors")
+        }
+        trigger = event.get("trigger", "scheduled")
+        if trigger not in ("scheduled", "on-demand"):
+            trigger = "scheduled"
+        details = [
+            {"errorCode": str(d.get("errorCode", ""))[:64],
+             "message": str(d.get("message", ""))[:128]}
+            for d in (event.get("errorDetails") or [])
+            if isinstance(d, dict)
+        ][:_MAX_ERROR_DETAILS]
+    except (TypeError, ValueError):
+        return None
+    return {
+        "run_id": run_id, "cursor": cursor or "", "depth": depth,
+        "lookback_start": lookback_start, "started_at": started_at,
+        "counters": counters, "trigger": trigger, "error_details": details,
+    }
+
+
+def _hand_off(
+    run_id: str, trigger: str, started_at: str, lookback_start: str,
+    cursor: str, depth: int, counters: dict, error_details: list,
+) -> bool:
+    """Checkpoint progress and asynchronously invoke this function again.
+
+    Returns True on success. On failure the caller records a terminal
+    state (releasing the guard); the next scheduled run starts over.
+    """
+    _config_table.put_item(Item=_progress_item(
+        run_id, "running", trigger, started_at, _now_iso(), counters,
+        error_details, cursor, depth, lookback_start,
+    ))
+    payload = {
+        "source": _CONTINUATION_SOURCE,
+        "runId": run_id,
+        "trigger": trigger,
+        "startedAt": started_at,
+        "lookbackStart": lookback_start,
+        "cursor": cursor,
+        "depth": depth,
+        "counters": counters,
+        "errorDetails": error_details[:_MAX_ERROR_DETAILS],
+    }
+    try:
+        _lambda_client.invoke(
+            FunctionName=os.environ.get("AWS_LAMBDA_FUNCTION_NAME", ""),
+            InvocationType="Event",
+            Payload=json.dumps(payload).encode("utf-8"),
+        )
+        return True
+    except ClientError:
+        logger.error(
+            "Continuation invoke failed — error_code=%s",
+            _ERR_CONTINUATION_FAILED,
+        )
+        return False
+
+
+def _time_low(context: Any) -> bool:
+    """True when the invocation is within the hand-off safety margin."""
+    getter = getattr(context, "get_remaining_time_in_millis", None)
+    if getter is None:
+        return False
+    return getter() < _TIME_BUDGET_MARGIN_MS
 
 
 def _write_state(
@@ -238,10 +417,15 @@ def _write_state(
 # ===================================================================
 
 
-def _list_health_events(lookback_hours: int = _DEFAULT_LOOKBACK_HOURS) -> list:
+def _list_health_events(
+    lookback_hours: int = _DEFAULT_LOOKBACK_HOURS,
+    start_time: Optional[datetime] = None,
+) -> list:
     """Paginate DescribeEventsForOrganization with lookback filter.
 
     IMPL-026-07: defensive upper bound on lookback window.
+    ``start_time`` pins the window for continuations so every hop of one
+    run works from the same lookback start.
     """
     if lookback_hours > _MAX_LOOKBACK_HOURS:
         logger.error(
@@ -250,7 +434,8 @@ def _list_health_events(lookback_hours: int = _DEFAULT_LOOKBACK_HOURS) -> list:
         )
         lookback_hours = _DEFAULT_LOOKBACK_HOURS
 
-    start_time = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    if start_time is None:
+        start_time = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
 
     events: list = []
     paginator = _health_client.get_paginator(
@@ -269,6 +454,8 @@ def _list_health_events(lookback_hours: int = _DEFAULT_LOOKBACK_HOURS) -> list:
         "Health API returned %d events with %dh lookback",
         len(events), lookback_hours,
     )
+    # Deterministic order: the continuation cursor is "last ARN processed".
+    events.sort(key=lambda e: str(e.get("arn", "")))
     return events
 
 
@@ -873,31 +1060,62 @@ def lambda_handler(event: dict, context: Any) -> dict:
 
     IMPL-026-02: Validates trigger source from event payload.
     IMPL-026-03: Uses try/finally to always write terminal state.
+
+    Large runs are split across invocations: see "Time budget &
+    continuation" in the module docstring.
     """
+    continuation = _parse_continuation(event)
+    if (
+        isinstance(event, dict)
+        and event.get("source") == _CONTINUATION_SOURCE
+        and continuation is None
+    ):
+        logger.error("Invalid continuation payload — ignored")
+        return {"status": "skipped", "reason": "invalid_continuation"}
+
     # Step 1: Detect trigger type (IMPL-026-02)
     trigger = "scheduled"
-    if isinstance(event, dict) and event.get("source") == "dashboard":
+    if continuation is not None:
+        trigger = continuation["trigger"]
+    elif isinstance(event, dict) and event.get("source") == "dashboard":
         trigger = "on-demand"
     elif isinstance(event, dict) and event.get("detail-type") == "Scheduled Event":
         trigger = "scheduled"
 
     logger.info(
-        "Reconciliation invoked — trigger=%s region=%s",
-        trigger, _AWS_REGION,
+        "Reconciliation invoked — trigger=%s region=%s continuation=%s",
+        trigger, _AWS_REGION, continuation is not None,
     )
 
-    started_at = _now_iso()
-    counters = {
-        "events_found": 0,
-        "events_ingested": 0,
-        "events_updated": 0,
-        "events_skipped": 0,
-        "errors": 0,
-    }
-    error_details: list = []
+    now_iso = _now_iso()
+    if continuation is not None:
+        run_id = continuation["run_id"]
+        started_at = continuation["started_at"]
+        counters = continuation["counters"]
+        error_details = continuation["error_details"]
+        cursor = continuation["cursor"]
+        depth = continuation["depth"] + 1
+        lookback_start = continuation["lookback_start"]
+    else:
+        run_id = str(uuid.uuid4())
+        started_at = now_iso
+        counters = {
+            "events_found": 0,
+            "events_ingested": 0,
+            "events_updated": 0,
+            "events_skipped": 0,
+            "errors": 0,
+        }
+        error_details = []
+        cursor = ""
+        depth = 0
+        lookback_start = (
+            datetime.now(timezone.utc)
+            - timedelta(hours=_DEFAULT_LOOKBACK_HOURS)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # Step 2: Acquire concurrency guard (Design)
-    if not _acquire_guard(started_at):
+    if not _acquire_guard(now_iso, run_id, continuation):
         logger.warning(
             "Reconciliation skipped — another run is active"
         )
@@ -907,7 +1125,12 @@ def lambda_handler(event: dict, context: Any) -> dict:
     try:
         # Step 3: Call Health API
         try:
-            health_events = _list_health_events(_DEFAULT_LOOKBACK_HOURS)
+            window_start = datetime.strptime(
+                lookback_start, "%Y-%m-%dT%H:%M:%SZ",
+            ).replace(tzinfo=timezone.utc)
+            health_events = _list_health_events(
+                _DEFAULT_LOOKBACK_HOURS, start_time=window_start,
+            )
         except ClientError:
             logger.error(
                 "Health API initial call failed — error_code=%s",
@@ -919,7 +1142,8 @@ def lambda_handler(event: dict, context: Any) -> dict:
             }], started_at)
             return {"status": "failed", "reason": "health_api_error"}
 
-        counters["events_found"] = len(health_events)
+        if continuation is None:
+            counters["events_found"] = len(health_events)
 
         if not health_events:
             logger.info("No events found in lookback window")
@@ -930,8 +1154,48 @@ def lambda_handler(event: dict, context: Any) -> dict:
         config = _load_config()
         now = _now_iso()
 
-        # Step 5: Process each event independently (Design)
+        # Step 5: Process each event independently (Design), in ARN order,
+        # resuming after the cursor on continuation hops.
         for health_event in health_events:
+            raw_arn = str(health_event.get("arn", ""))
+            if cursor and raw_arn <= cursor:
+                continue
+
+            if _time_low(context):
+                if depth >= _MAX_CONTINUATIONS:
+                    logger.error(
+                        "Continuation limit reached — error_code=%s",
+                        _ERR_CONTINUATION_LIMIT,
+                    )
+                    error_details.append({
+                        "errorCode": _ERR_CONTINUATION_LIMIT,
+                        "message": "Run incomplete; remaining events deferred",
+                    })
+                    _write_state(
+                        "completed_with_errors", trigger, counters,
+                        error_details, started_at,
+                    )
+                    return {"status": "completed_with_errors", **counters}
+                if _hand_off(
+                    run_id, trigger, started_at, lookback_start, cursor,
+                    depth, counters, error_details,
+                ):
+                    logger.info(
+                        "Reconciliation continuing in new invocation — "
+                        "depth=%d", depth,
+                    )
+                    return {"status": "continued", "depth": depth, **counters}
+                error_details.append({
+                    "errorCode": _ERR_CONTINUATION_FAILED,
+                    "message": "Continuation invoke failed; remaining events deferred",
+                })
+                counters["errors"] += 1
+                _write_state(
+                    "completed_with_errors", trigger, counters,
+                    error_details, started_at,
+                )
+                return {"status": "completed_with_errors", **counters}
+
             event_arn = _sanitize_log(health_event.get("arn", "UNKNOWN"))
             try:
                 result = _process_single_event(health_event, config, now)
@@ -952,6 +1216,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
                     "Per-event error — error_code=%s event_arn=%s",
                     _ERR_CAMPAIGN_WRITE_FAILED, event_arn,
                 )
+            cursor = raw_arn
 
         # Step 6: Write final state
         status = (

@@ -158,6 +158,19 @@ class ApiStack(cdk.Stack):
             "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Scan",
         )
 
+        # IAM — self-invoke for time-budget continuations (large orgs).
+        # ARN is constructed from the fixed function name rather than
+        # grant_invoke(self) to avoid a role <-> function circular dependency.
+        self.reconciliation_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["lambda:InvokeFunction"],
+            resources=[cdk.Stack.of(self).format_arn(
+                service="lambda",
+                resource="function",
+                resource_name="compass-reconciliation",
+                arn_format=cdk.ArnFormat.COLON_RESOURCE_NAME,
+            )],
+        ))
+
         # IAM — SNS publish + KMS encrypt for cross-stack encrypted topic
         integration_topic.grant_publish(self.reconciliation_fn)
         sns_key.grant_encrypt_decrypt(self.reconciliation_fn)
