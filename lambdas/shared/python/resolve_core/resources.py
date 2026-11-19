@@ -232,8 +232,19 @@ def update_routed_via(
     routed_via: str,
     routing_error: Optional[str],
     now: str,
+    account_id: Optional[str] = None,
 ) -> None:
-    """Persist routing attribution (``routedVia``) on all resources of a campaign.
+    """Persist routing attribution (``routedVia``) on a campaign's resources.
+
+    When ``account_id`` is given (the Processor and Reconciliation paths),
+    only that account's rows are updated. Routing is resolved per affected
+    account, and PLE campaigns merge every account's resources into one
+    partition: updating the whole campaign on every event made an org-wide
+    event cost O(accounts x resources) writes on a single partition key
+    (heavy throttling in load tests) and let the last-processed account's
+    attribution overwrite every other account's. Scoping by account (not
+    by event) still attributes rows written by later pages of the same
+    event, which skip routing.
 
     Queries every resource row for ``campaign_id`` and ``UpdateItem``-SETs
     ``routedVia`` and ``updatedAt`` (plus ``routingError`` when supplied) on
@@ -262,11 +273,22 @@ def update_routed_via(
             outcome is a genuine no-target ``error``, else ``None``.
         now: ISO 8601 timestamp for ``updatedAt``.
     """
-    query_kwargs = {
+    query_kwargs: dict = {
         "KeyConditionExpression": "campaignId = :cid",
         "ExpressionAttributeValues": {":cid": campaign_id},
         "ProjectionExpression": "campaignId, trackingKey",
     }
+    if account_id is not None:
+        valid_account = _validate_account_id(account_id)
+        if valid_account is None:
+            logger.warning(
+                "routedVia scope fallback to whole campaign — invalid accountId "
+                "campaign_id=%s containsPII=false",
+                _sanitize_log(campaign_id),
+            )
+        else:
+            query_kwargs["FilterExpression"] = "accountId = :acct"
+            query_kwargs["ExpressionAttributeValues"][":acct"] = valid_account
 
     try:
         while True:
