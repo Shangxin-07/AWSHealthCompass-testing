@@ -5,8 +5,10 @@ Creates: 3 Amazon DynamoDB tables, 2 Amazon SQS queues, 1 Amazon SNS topic,
 function (stub), 1 Lambda Layer (empty), 1 Amazon CloudFront distribution
 (dashboard), 2 Amazon CloudWatch alarms, cross-region SQS resource policy.
 
-All resources deploy to us-east-1. This stack blocks every other story.
+All resources deploy to the primary region (-c primary_region, default us-east-1). This stack blocks every other story.
 """
+import re
+
 import aws_cdk as cdk
 from aws_cdk import (
     Duration,
@@ -150,7 +152,7 @@ class CoreStack(cdk.Stack):
             },
         ))
 
-        # Allow test EventBridge rule (us-east-1) when deploy_test_tools is enabled.
+        # Allow test EventBridge rule (primary region) when deploy_test_tools is enabled.
         # The test rule uses its own IAM role with sqs:SendMessage, but SQS
         # resource policy must also allow the EventBridge service principal.
         if self.node.try_get_context("deploy_test_tools") == "true":
@@ -161,7 +163,7 @@ class CoreStack(cdk.Stack):
                 resources=[self.ingestion_queue.queue_arn],
                 conditions={
                     "ArnEquals": {
-                        "aws:SourceArn": f"arn:aws:events:us-east-1:{self.account}:rule/{TEST_HEALTH_EVENT_RULE_NAME}",
+                        "aws:SourceArn": f"arn:aws:events:{self.region}:{self.account}:rule/{TEST_HEALTH_EVENT_RULE_NAME}",
                     },
                     "StringEquals": {
                         "aws:SourceAccount": self.account,
@@ -206,7 +208,7 @@ class CoreStack(cdk.Stack):
         self.ops_alerts_topic = sns.Topic(
             self, "OpsAlertsTopic",
             topic_name="compass-ops-alerts",
-            display_name="Compass Operational Alerts (us-east-1)",
+            display_name=f"Compass Operational Alerts ({self.region})",
             enforce_ssl=True,
             master_key=kms.Alias.from_alias_name(self, "OpsAlertsTopicKeyAlias", "alias/aws/sns"),
         )
@@ -402,25 +404,54 @@ class CoreStack(cdk.Stack):
         waf_mode = self.node.try_get_context("waf_mode") or "block"
         waf_rate_limit = int(self.node.try_get_context("waf_rate_limit") or 2000)
 
-        self.cloudfront_acl = wafv2.CfnWebACL(
-            self, "DashboardCloudFrontWebAcl",
-            name="compass-dashboard-cloudfront",
-            scope="CLOUDFRONT",
-            default_action=wafv2.CfnWebACL.DefaultActionProperty(allow={}),
-            visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
-                cloud_watch_metrics_enabled=True,
-                metric_name="CompassDashboardCloudFrontAcl",
-                sampled_requests_enabled=True,
-            ),
-            rules=build_waf_rules(
-                waf_mode=waf_mode,
-                rate_limit=waf_rate_limit,
-            ),
+        # CLOUDFRONT-scope WebACLs can only be created in us-east-1. Options:
+        #   -c cloudfront_web_acl_arn=<arn>  attach an existing (e.g. org-managed)
+        #                                    CLOUDFRONT WebACL; none is created
+        #   primary region us-east-1         create the Compass WebACL (default)
+        #   any other primary region         no CloudFront WAF (warning at synth);
+        #                                    the API's REGIONAL WebACL still applies
+        existing_cf_acl = self.node.try_get_context("cloudfront_web_acl_arn")
+        if existing_cf_acl and not re.fullmatch(
+            r"arn:aws:wafv2:us-east-1:\d{12}:global/webacl/[\w-]+/[\w-]+",
+            existing_cf_acl,
+        ):
+            raise ValueError(
+                "cloudfront_web_acl_arn must be a CLOUDFRONT-scope WebACL ARN "
+                "(arn:aws:wafv2:us-east-1:<account>:global/webacl/<name>/<id>)"
+            )
+        create_cf_acl = not existing_cf_acl and self.region == "us-east-1"
+
+        self.cloudfront_acl = None
+        if create_cf_acl:
+            self.cloudfront_acl = wafv2.CfnWebACL(
+                self, "DashboardCloudFrontWebAcl",
+                name="compass-dashboard-cloudfront",
+                scope="CLOUDFRONT",
+                default_action=wafv2.CfnWebACL.DefaultActionProperty(allow={}),
+                visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
+                    cloud_watch_metrics_enabled=True,
+                    metric_name="CompassDashboardCloudFrontAcl",
+                    sampled_requests_enabled=True,
+                ),
+                rules=build_waf_rules(
+                    waf_mode=waf_mode,
+                    rate_limit=waf_rate_limit,
+                ),
+            )
+
+        cf_web_acl_id = existing_cf_acl or (
+            self.cloudfront_acl.attr_arn if self.cloudfront_acl else None
         )
+        if not cf_web_acl_id:
+            cdk.Annotations.of(self).add_warning(
+                f"No CloudFront WAF on the dashboard: CLOUDFRONT WebACLs must be "
+                f"created in us-east-1 and the primary region is {self.region}. "
+                f"Pass -c cloudfront_web_acl_arn=<arn> to attach an existing one."
+            )
 
         self.dashboard_distribution = cloudfront.Distribution(
             self, "DashboardDistribution",
-            web_acl_id=self.cloudfront_acl.attr_arn,  # full CLOUDFRONT WebACL ARN
+            web_acl_id=cf_web_acl_id,  # full CLOUDFRONT WebACL ARN, or None
             default_behavior=cloudfront.BehaviorOptions(
                 origin=origins.S3Origin(
                     self.dashboard_bucket,
@@ -448,60 +479,61 @@ class CoreStack(cdk.Stack):
             minimum_protocol_version=cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
         )
 
-        # ---------------------------------------------------------------
-        # WAF logging for the CloudFront WebACL.
-        # Name MUST start with 'aws-waf-logs-'. Credential headers redacted.
-        # ---------------------------------------------------------------
-        cf_waf_log_group = logs.LogGroup(
-            self, "CloudFrontWafLogGroup",
-            log_group_name="aws-waf-logs-compass-cloudfront",
-            retention=logs.RetentionDays.ONE_MONTH,
-            removal_policy=RemovalPolicy.DESTROY,
-        )
+        if create_cf_acl:
+            # ---------------------------------------------------------------
+            # WAF logging for the CloudFront WebACL.
+            # Name MUST start with 'aws-waf-logs-'. Credential headers redacted.
+            # ---------------------------------------------------------------
+            cf_waf_log_group = logs.LogGroup(
+                self, "CloudFrontWafLogGroup",
+                log_group_name="aws-waf-logs-compass-cloudfront",
+                retention=logs.RetentionDays.ONE_MONTH,
+                removal_policy=RemovalPolicy.DESTROY,
+            )
 
-        # CfnLoggingConfiguration does NOT create
-        # the CloudWatch Logs resource policy authorizing WAF's vended-log
-        # delivery principal. Without it, delivery is silently denied.
-        # Provision it explicitly, scoped to this account + region.
-        cf_waf_log_policy = logs.ResourcePolicy(
-            self, "CloudFrontWafLogResourcePolicy",
-            resource_policy_name="compass-waf-cloudfront-log-delivery",
-            policy_statements=[
-                iam.PolicyStatement(
-                    sid="AWSWAFLogDeliveryCloudFront",
-                    effect=iam.Effect.ALLOW,
-                    principals=[iam.ServicePrincipal("delivery.logs.amazonaws.com")],
-                    actions=["logs:CreateLogStream", "logs:PutLogEvents"],
-                    resources=[cf_waf_log_group.log_group_arn],
-                    conditions={
-                        "StringEquals": {"aws:SourceAccount": self.account},
-                        "ArnLike": {
-                            "aws:SourceArn": f"arn:{self.partition}:logs:{self.region}:{self.account}:*",
+            # CfnLoggingConfiguration does NOT create
+            # the CloudWatch Logs resource policy authorizing WAF's vended-log
+            # delivery principal. Without it, delivery is silently denied.
+            # Provision it explicitly, scoped to this account + region.
+            cf_waf_log_policy = logs.ResourcePolicy(
+                self, "CloudFrontWafLogResourcePolicy",
+                resource_policy_name="compass-waf-cloudfront-log-delivery",
+                policy_statements=[
+                    iam.PolicyStatement(
+                        sid="AWSWAFLogDeliveryCloudFront",
+                        effect=iam.Effect.ALLOW,
+                        principals=[iam.ServicePrincipal("delivery.logs.amazonaws.com")],
+                        actions=["logs:CreateLogStream", "logs:PutLogEvents"],
+                        resources=[cf_waf_log_group.log_group_arn],
+                        conditions={
+                            "StringEquals": {"aws:SourceAccount": self.account},
+                            "ArnLike": {
+                                "aws:SourceArn": f"arn:{self.partition}:logs:{self.region}:{self.account}:*",
+                            },
                         },
-                    },
-                ),
-            ],
-        )
+                    ),
+                ],
+            )
 
-        # LoggingConfiguration destination requires the log-group ARN WITHOUT
-        # the trailing ':*' (CDK log_group_arn appends it; WAF rejects it).
-        cf_waf_log_group_arn = (
-            f"arn:{self.partition}:logs:{self.region}:{self.account}"
-            ":log-group:aws-waf-logs-compass-cloudfront"
-        )
-        cf_waf_logging = wafv2.CfnLoggingConfiguration(
-            self, "CloudFrontWafLoggingConfig",
-            resource_arn=self.cloudfront_acl.attr_arn,
-            log_destination_configs=[cf_waf_log_group_arn],
-            redacted_fields=[
-                wafv2.CfnLoggingConfiguration.FieldToMatchProperty(
-                    single_header={"Name": "authorization"}),
-                wafv2.CfnLoggingConfiguration.FieldToMatchProperty(
-                    single_header={"Name": "x-api-key"}),
-            ],
-        )
-        cf_waf_logging.node.add_dependency(cf_waf_log_policy)
-        cf_waf_logging.node.add_dependency(cf_waf_log_group)
+            # LoggingConfiguration destination requires the log-group ARN WITHOUT
+            # the trailing ':*' (CDK log_group_arn appends it; WAF rejects it).
+            cf_waf_log_group_arn = (
+                f"arn:{self.partition}:logs:{self.region}:{self.account}"
+                ":log-group:aws-waf-logs-compass-cloudfront"
+            )
+            cf_waf_logging = wafv2.CfnLoggingConfiguration(
+                self, "CloudFrontWafLoggingConfig",
+                resource_arn=self.cloudfront_acl.attr_arn,
+                log_destination_configs=[cf_waf_log_group_arn],
+                redacted_fields=[
+                    wafv2.CfnLoggingConfiguration.FieldToMatchProperty(
+                        single_header={"Name": "authorization"}),
+                    wafv2.CfnLoggingConfiguration.FieldToMatchProperty(
+                        single_header={"Name": "x-api-key"}),
+                ],
+            )
+            cf_waf_logging.node.add_dependency(cf_waf_log_policy)
+            cf_waf_logging.node.add_dependency(cf_waf_log_group)
 
         # BUG-S23-001: Force re-upload every deploy. CDK asset hashing can
         # cache the fingerprint and skip upload even when dist/ content changed.
