@@ -77,7 +77,8 @@ class ServiceNowIntegrationStack(cdk.Stack):
         self.servicenow_queue = sqs.Queue(
             self, "ServiceNowQueue",
             queue_name="compass-servicenow-integration",
-            visibility_timeout=Duration.seconds(300),
+            # ServiceNow Lambda timeout is 5 min; AWS recommends >= 6x so slow runs are not redelivered mid-flight.
+            visibility_timeout=Duration.minutes(30),
             enforce_ssl=True,
             encryption=sqs.QueueEncryption.SQS_MANAGED,
             dead_letter_queue=sqs.DeadLetterQueue(

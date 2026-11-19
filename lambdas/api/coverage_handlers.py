@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 
 import boto3
 from botocore.exceptions import ClientError
@@ -26,8 +27,10 @@ CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
 }
 
-# Max scan pages to prevent runaway
-_MAX_SCAN_PAGES = 10
+# Scans are bounded by wall-clock time (not a fixed page count) so results
+# stay correct for large tables while still finishing inside the API
+# Lambda's timeout. If the budget is hit, responses carry partial=True.
+_SCAN_TIME_BUDGET_S = 20.0
 _UNROUTABLE_LIMIT = 100
 
 _dynamodb = boto3.resource("dynamodb")
@@ -72,15 +75,15 @@ def handle_routing_coverage(event, context):
         "failed": 0,
     }
     total = 0
+    partial = False
 
     try:
         scan_kwargs = {
             "ProjectionExpression": "routedVia",
         }
-        pages = 0
-        while pages < _MAX_SCAN_PAGES:
+        deadline = time.monotonic() + _SCAN_TIME_BUDGET_S
+        while True:
             resp = _resources_table().scan(**scan_kwargs)
-            pages += 1
             for item in resp.get("Items", []):
                 total += 1
                 routed_via = item.get("routedVia")
@@ -91,6 +94,10 @@ def handle_routing_coverage(event, context):
                     breakdown["failed"] += 1
 
             if "LastEvaluatedKey" not in resp:
+                break
+            if time.monotonic() >= deadline:
+                partial = True
+                logger.warning("Routing coverage scan hit time budget — total_so_far=%d", total)
                 break
             scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
 
@@ -105,6 +112,7 @@ def handle_routing_coverage(event, context):
             "routedResources": 0,
             "breakdown": breakdown,
             "message": "No resources tracked yet. Ingest Health events to see routing coverage.",
+            "partial": partial,
         })
 
     routed = total - breakdown["failed"]
@@ -116,6 +124,7 @@ def handle_routing_coverage(event, context):
         "routedResources": routed,
         "breakdown": breakdown,
         "message": None,
+        "partial": partial,
     })
 
 
@@ -127,15 +136,15 @@ def handle_unroutable(event, context):
     """Scan ResourcesTable for resources with routedVia=error or missing."""
     resources = []
     total_unroutable = 0
+    partial = False
 
     try:
         scan_kwargs = {
             "ProjectionExpression": "campaignId, trackingKey, accountId, routedVia, routingError",
         }
-        pages = 0
-        while pages < _MAX_SCAN_PAGES:
+        deadline = time.monotonic() + _SCAN_TIME_BUDGET_S
+        while True:
             resp = _resources_table().scan(**scan_kwargs)
-            pages += 1
             for item in resp.get("Items", []):
                 routed_via = item.get("routedVia")
                 if routed_via not in ("resourceTag", "accountTag", "account", "service", "default"):
@@ -151,6 +160,10 @@ def handle_unroutable(event, context):
 
             if "LastEvaluatedKey" not in resp:
                 break
+            if time.monotonic() >= deadline:
+                partial = True
+                logger.warning("Unroutable scan hit time budget — total_so_far=%d", total_unroutable)
+                break
             scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
 
     except ClientError:
@@ -160,6 +173,7 @@ def handle_unroutable(event, context):
     return _success(200, {
         "unroutableCount": total_unroutable,
         "resources": resources,
+        "partial": partial,
     })
 
 
