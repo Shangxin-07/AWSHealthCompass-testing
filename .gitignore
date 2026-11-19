@@ -7,8 +7,8 @@
 build
 code/**.zip
 
-# CTRL-09: Copied factory files in event_generator Lambda (synth-time artifacts)
-lambdas/event_generator/event_factory.py
+# CTRL-09: event_factory.py is now committed (it was ignored but nothing
+# generated it, so the Event Generator failed to import).
 lambdas/event_generator/events/
 
 # CDK
