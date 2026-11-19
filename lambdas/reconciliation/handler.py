@@ -969,6 +969,7 @@ def _process_single_event(
             )
             update_routed_via(
                 _resources_table, campaign_id, routed_via, routing_error, now,
+                account_id=affected_account,
             )
 
             if routing_result.get("resolvedProject") is not None:

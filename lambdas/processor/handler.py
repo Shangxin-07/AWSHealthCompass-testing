@@ -723,7 +723,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
             update_routed_via(
                 _resources_table, campaign_id, "error",
                 f"No routing rule matched for account {affected_account}",
-                _now_iso(),
+                _now_iso(), account_id=affected_account,
             )
             # Still publish to SNS — event visible in dashboard as unroutable
 
@@ -748,7 +748,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
         )
         update_routed_via(
             _resources_table, campaign_id, routed_via, routing_error,
-            _now_iso(),
+            _now_iso(), account_id=affected_account,
         )
 
         # --- (l) BUILD STANDARDIZED EVENT ---
