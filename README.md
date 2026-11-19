@@ -145,6 +145,20 @@ flowchart TD
 
 The Health Org API is available only in us-east-1. All processing infrastructure deploys there regardless of the customer's primary operating region. The EventBridge rule in us-west-2 uses the AWS Health **simplified integration** pattern: a single rule in US West (Oregon) automatically aggregates Health events from all standard partition regions. This eliminates the need to configure per-region rules at the cost of high-availability (acceptable — daily reconciliation is the safety net). This is a functional region split, not a multi-region HA deployment. DynamoDB tables are single-region in us-east-1.
 
+#### Region overrides (org policy / SCP-restricted accounts)
+
+Many organizations restrict regions with SCPs. These CDK context flags let Compass deploy where us-east-1 / us-west-2 are blocked. With none of them set, the synthesized templates are unchanged.
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `-c primary_region=<region>` | `us-east-1` | Deploys all processing infrastructure (CompassCore, CompassApi, CompassJira, CompassServiceNow, CompassTestTools) to this region. The Reconciliation Lambda still calls the Health Organizational View API's us-east-1 endpoint. |
+| `-c deploy_event_capture=false` | `true` | Skips the us-west-2 `CompassEventCapture` stack. **No real-time Health events are captured**; events arrive only via daily reconciliation or the test tools. Intended for load tests or until an SCP exception for us-west-2 is in place. |
+| `-c cloudfront_web_acl_arn=<arn>` | unset | Attaches an existing CLOUDFRONT-scope WebACL (e.g. org-managed) to the dashboard instead of creating one. |
+
+CLOUDFRONT-scope WebACLs can only be created in us-east-1. If `primary_region` is anything else and no `cloudfront_web_acl_arn` is given, the dashboard distribution is deployed **without** a CloudFront WAF and synth prints a warning. The API Gateway's REGIONAL WebACL is still created in the primary region.
+
+> **Production note:** org-wide real-time capture still requires the us-west-2 EventBridge rule and SQS DLQ, and reconciliation requires the Health API in us-east-1 (from the Health delegated-admin or management account). An SCP-restricted production account needs an exception for those, or it relies on daily reconciliation only.
+
 ### Infrastructure Footprint
 
 | Resource | Count | Notes |

@@ -3,7 +3,7 @@
 Creates: Amazon SQS JIRA queue + DLQ, JIRA Integration AWS Lambda (stub),
 Amazon SNS subscription, Amazon CloudWatch log group, DLQ alarm.
 
-All resources deploy to us-east-1. Depends on CompassCore stack.
+All resources deploy to the primary region (-c primary_region, default us-east-1). Depends on CompassCore stack.
 """
 import aws_cdk as cdk
 from aws_cdk import (

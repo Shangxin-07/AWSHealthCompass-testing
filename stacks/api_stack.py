@@ -4,7 +4,7 @@ Creates: REST API with API key auth, usage plan, API AWS Lambda (stub),
 2 scheduled Lambda functions (stubs), 2 Amazon EventBridge schedule rules,
 Amazon CloudWatch log groups, Cognito User Pool with RBAC groups.
 
-All resources deploy to us-east-1. Depends on CompassCore stack.
+All resources deploy to the primary region (-c primary_region, default us-east-1). Depends on CompassCore stack.
 """
 import aws_cdk as cdk
 from aws_cdk import (
@@ -853,7 +853,7 @@ class ApiStack(cdk.Stack):
                 "userPoolId": self.user_pool.user_pool_id,
                 "clientId": self.app_client.user_pool_client_id,
                 "apiUrl": self.api.url,
-                "region": "us-east-1",
+                "region": self.region,
             })],
             destination_bucket=dashboard_bucket,
             distribution=dashboard_distribution,

@@ -3,7 +3,7 @@
 Creates: Amazon SQS ServiceNow queue + DLQ, ServiceNow Integration AWS Lambda (stub),
 Amazon SNS subscription, AWS Secrets Manager secret, Amazon CloudWatch DLQ alarm.
 
-All resources deploy to us-east-1. Depends on CompassCore stack.
+All resources deploy to the primary region (-c primary_region, default us-east-1). Depends on CompassCore stack.
 Deployment gated by context flag: deploy_servicenow=true
 """
 import aws_cdk as cdk
