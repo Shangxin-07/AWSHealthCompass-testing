@@ -157,6 +157,12 @@ Many organizations restrict regions with SCPs. These CDK context flags let Compa
 
 CLOUDFRONT-scope WebACLs can only be created in us-east-1. If `primary_region` is anything else and no `cloudfront_web_acl_arn` is given, the dashboard distribution is deployed **without** a CloudFront WAF and synth prints a warning. The API Gateway's REGIONAL WebACL is still created in the primary region.
 
+#### Ephemeral (test) deployments
+
+`-c ephemeral=true` makes `cdk destroy` remove everything the stacks create: the three DynamoDB tables, the SNS KMS key (7-day pending-deletion window, the AWS minimum) and the Cognito user pool are set to delete rather than retain, and the Processor and test Event Generator get stack-managed log groups (30-day retention). **Never use it for production** — destroying the stack deletes all campaign and routing data. Without the flag, templates are unchanged.
+
+Still left after destroy, even when ephemeral: the API Gateway account-level CloudWatch role setting (region-wide, may be shared with other APIs, so it is deliberately retained), CDK assets in the bootstrap bucket, and log groups that AWS creates for CDK's own custom-resource helper Lambdas.
+
 > **Production note:** org-wide real-time capture still requires the us-west-2 EventBridge rule and SQS DLQ, and reconciliation requires the Health API in us-east-1 (from the Health delegated-admin or management account). An SCP-restricted production account needs an exception for those, or it relies on daily reconciliation only.
 
 ### Infrastructure Footprint

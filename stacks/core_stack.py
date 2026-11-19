@@ -62,6 +62,12 @@ class CoreStack(cdk.Stack):
         # ---------------------------------------------------------------
         # DynamoDB Tables
         # ---------------------------------------------------------------
+        # -c ephemeral=true: test deployments that `cdk destroy` removes
+        # completely (data tables, KMS key, all Lambda log groups). Default
+        # keeps production-safe RETAIN policies; templates are unchanged.
+        ephemeral = self.node.try_get_context("ephemeral") == "true"
+        data_removal = RemovalPolicy.DESTROY if ephemeral else RemovalPolicy.RETAIN
+
         self.config_table = dynamodb.Table(
             self, "ConfigTable",
             table_name="compass-config",
@@ -69,7 +75,7 @@ class CoreStack(cdk.Stack):
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             point_in_time_recovery=True,
             encryption=dynamodb.TableEncryption.AWS_MANAGED,
-            removal_policy=RemovalPolicy.RETAIN,
+            removal_policy=data_removal,
             time_to_live_attribute="ttl",
         )
 
@@ -80,7 +86,7 @@ class CoreStack(cdk.Stack):
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             point_in_time_recovery=True,
             encryption=dynamodb.TableEncryption.AWS_MANAGED,
-            removal_policy=RemovalPolicy.RETAIN,
+            removal_policy=data_removal,
         )
         self.campaigns_table.add_global_secondary_index(
             index_name="service-startTime-index",
@@ -101,7 +107,7 @@ class CoreStack(cdk.Stack):
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             point_in_time_recovery=True,
             encryption=dynamodb.TableEncryption.AWS_MANAGED,
-            removal_policy=RemovalPolicy.RETAIN,
+            removal_policy=data_removal,
             time_to_live_attribute="expiresAt",
         )
         self.resources_table.add_global_secondary_index(
@@ -179,6 +185,9 @@ class CoreStack(cdk.Stack):
             self, "SnsEncryptionKey",
             description="KMS key for Compass SNS topic encryption",
             enable_key_rotation=True,
+            # Default (None) keeps CDK's RETAIN for KMS keys.
+            removal_policy=RemovalPolicy.DESTROY if ephemeral else None,
+            pending_window=Duration.days(7) if ephemeral else None,
         )
 
         # SQS service principal must decrypt SNS messages
@@ -287,6 +296,18 @@ class CoreStack(cdk.Stack):
         # Processor Lambda (stub — business logic added later)
         # NO Secrets Manager access, NO secret values in env vars
         # ---------------------------------------------------------------
+        # Ephemeral only: a stack-managed log group so destroy removes it.
+        # (Not added by default: existing deployments already have a
+        # Lambda-created group of this name, and creating it would conflict.)
+        processor_log_group = None
+        if ephemeral:
+            processor_log_group = logs.LogGroup(
+                self, "ProcessorLogGroup",
+                log_group_name="/aws/lambda/compass-processor",
+                retention=logs.RetentionDays.ONE_MONTH,
+                removal_policy=RemovalPolicy.DESTROY,
+            )
+
         self.processor_fn = lambda_.Function(
             self, "Processor",
             function_name="compass-processor",
@@ -304,6 +325,7 @@ class CoreStack(cdk.Stack):
                 "PAYLOAD_BUCKET": self.payload_bucket.bucket_name,
                 "LOG_LEVEL": "INFO",
             },
+            log_group=processor_log_group,
         )
 
         # SQS Event Source Mapping
