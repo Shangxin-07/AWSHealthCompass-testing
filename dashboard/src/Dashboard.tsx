@@ -203,7 +203,8 @@ export default function Dashboard({ campaigns, config, onRefresh, notify, onNavi
   const active = campaigns.filter(c => c.status === 'active').length;
   const critical = campaigns.filter(c => daysLeft(c.deadline) <= 30 && daysLeft(c.deadline) >= 0).length;
   const pendingRes = campaigns.reduce((s, c) => s + c.totalResources - c.resolvedResources, 0);
-  const activeCamp = campaigns.filter(c => c.ticketedResources > 0).length;
+  // Campaigns that have at least one ticket (any status), not campaign state.
+  const withTickets = campaigns.filter(c => c.ticketedResources > 0).length;
 
   // Platform-aware setup-alert readiness, driven by the resolved
   // platforms array (not the JIRA-only scalar). For a SNOW-only deployment,
@@ -252,7 +253,7 @@ export default function Dashboard({ campaigns, config, onRefresh, notify, onNavi
         <Container><Box variant="awsui-key-label">Active Events</Box><Box variant="awsui-value-large">{active}</Box></Container>
         <Container><Box variant="awsui-key-label">Critical (&lt;30d)</Box><Box variant="awsui-value-large">{critical}</Box></Container>
         <Container><Box variant="awsui-key-label">Pending Resources</Box><Box variant="awsui-value-large">{pendingRes}</Box></Container>
-        <Container><Box variant="awsui-key-label">Active Campaigns</Box><Box variant="awsui-value-large">{activeCamp}</Box></Container>
+        <Container><Box variant="awsui-key-label">Campaigns with Tickets</Box><Box variant="awsui-value-large">{withTickets}</Box></Container>
         {orphanStatus.orphanCount > 0 && (
           <Container>
             <Box variant="awsui-key-label" color={orphanStatus.thresholdExceeded ? 'text-status-error' : undefined}>
