@@ -206,6 +206,8 @@ def test_api_detail_embeds_first_page_and_stats_breakdown(ddb):
     api = _load_api()
     body = json.loads(api.handle_campaign_detail(_ev("/api/campaigns/{id}", CID), None)["body"])
     assert len(body["resources"]) == api._DETAIL_RESOURCE_LIMIT and body["resourcesTruncated"] is True
+    assert all(r["accountName"].startswith("name-") for r in body["resources"])
+    assert "ticketsCreated" in body and "ticketsClosed" in body
     assert body["totalResources"] == total
     assert sum(g["total"] for g in body["groupBreakdown"].values()) == total
     assert all(g["resolved"] == 20 and g["pending"] == 40 for g in body["groupBreakdown"].values())
@@ -226,6 +228,7 @@ def test_api_resources_pages_through_everything_once(ddb):
             break
     assert len(seen) == total and len(set(seen)) == total
     assert body["totalCount"] == total
+    assert body["resources"][0]["accountName"].startswith("name-")
 
 
 def test_api_resources_filters_and_counts(ddb):

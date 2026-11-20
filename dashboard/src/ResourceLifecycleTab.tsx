@@ -9,11 +9,12 @@ import Box from '@cloudscape-design/components/box';
 import Alert from '@cloudscape-design/components/alert';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import { apiFetch } from './api';
+import { TicketLink } from './uiHelpers';
 
 type Status = 'PENDING' | 'RESOLVED';
 interface CampaignOption { campaignId: string; title: string; totalResources: number; }
 interface AccountRow { groupKey: string; groupLabel: string; total: number; pending: number; resolved: number; }
-interface ResourceRow { resourceArn: string; accountId: string; healthStatus: string; ticketId?: string; jiraTicketKey?: string; }
+interface ResourceRow { resourceArn: string; accountId: string; healthStatus: string; ticketId?: string; jiraTicketKey?: string; ticketUrl?: string; }
 
 /** Delay before re-reading counts: the replayed events go through the ingestion queue. */
 export const REFRESH_DELAY_MS = 8000;
@@ -156,7 +157,7 @@ export default function ResourceLifecycleTab() {
           columnDefinitions={[
             { id: 'arn', header: 'Resource ARN', cell: r => <Box variant="code">{r.resourceArn}</Box> },
             { id: 'health', header: 'Health', cell: r => healthCell(r.healthStatus) },
-            { id: 'ticket', header: 'Ticket', cell: r => r.ticketId || r.jiraTicketKey || '—' },
+            { id: 'ticket', header: 'Ticket', cell: r => <TicketLink id={r.ticketId || r.jiraTicketKey} url={r.ticketUrl} /> },
           ]}
           footer={nextToken ? <Box textAlign="center"><Button onClick={() => campaignId && loadResources(campaignId, account.groupKey, nextToken)}>Load more</Button></Box> : undefined}
           empty={<Box>No resources</Box>}
