@@ -96,7 +96,7 @@ def _build_summary(event: dict, routing: dict, resource_count: int) -> str:
     """
     service = event.get("service", "Unknown")
     event_type = event.get("eventTypeCode", "")
-    account = event.get("affectedAccount", "")
+    account = _format_account_display(event, routing)
 
     summary = (
         f"{TICKET_SUMMARY_PREFIX} {service} {event_type} — "
@@ -233,7 +233,7 @@ def _build_metadata(event: dict, routing: dict) -> List[dict]:
     paragraphs = [
         adf_bold_value("Service: ", event.get("service", "")),
         adf_bold_value("Deadline: ", event.get("startTime", "")),
-        adf_bold_value("Account: ", event.get("affectedAccount", "")),
+        adf_bold_value("Account: ", _format_account_display(event, routing)),
         adf_bold_value("Region: ", event.get("region", "")),
         adf_bold_value("Actionability: ", event.get("actionability", "")),
     ]
@@ -348,16 +348,27 @@ def sanitize_description(description: Any) -> str:
     return cleaned[:_MAX_DESCRIPTION_LEN]
 
 
-def _format_account_display(event: dict) -> str:
-    """Format account display string, truncated to 50 chars."""
+def _format_account_display(event: dict, routing: Optional[dict] = None) -> str:
+    """Format "{accountId} ({name})", truncated to 50 chars.
+
+    The name comes from the account's routing record (``accountName`` on the
+    routing result, set from ``ROUTING#{accountId}.account_name``), falling
+    back to an account ``Name`` tag. Health events from the organizational
+    API carry no account tags, so the routing record is the usual source.
+    """
     account_tags = event.get("accountTags") or {}
-    name = account_tags.get("Name", "")
+    name = ((routing or {}).get("accountName") or account_tags.get("Name", "") or "")
+    name = str(name).strip()
     account_id = event.get("affectedAccount", "")
     if name:
         display = f"{account_id} ({name})"
     else:
         display = account_id
     return display[:_MAX_DISPLAY_LEN]
+
+
+# Public name for other platform handlers (e.g. ServiceNow).
+format_account_display = _format_account_display
 
 
 # ------------------------------------------------------------------
@@ -406,7 +417,7 @@ def _build_summary_b(event: dict, routing: dict) -> str:
     """
     service = event.get("service", "Unknown")
     code = event.get("eventTypeCode", "")
-    account = _format_account_display(event)
+    account = _format_account_display(event, routing)
     tag_val = routing.get("routingTagValue", "")
     if tag_val:
         tag_val = str(tag_val)[:_MAX_DISPLAY_LEN]
@@ -497,7 +508,7 @@ def _build_metadata_b(event: dict) -> List[dict]:
     return [
         adf_bold_value("Service: ", event.get("service", "")),
         adf_bold_value("Deadline: ", event.get("startTime") or "Not specified"),
-        adf_bold_value("Account: ", _format_account_display(event)),
+        adf_bold_value("Account: ", _format_account_display(event, routing)),
         adf_bold_value("Region: ", event.get("region", "")),
         adf_bold_value("Actionability: ", event.get("actionability", "")),
         adf_bold_value(
@@ -778,7 +789,7 @@ def build_ticket_content(
         metadata_pairs = [
             ("Service", event.get("service", "")),
             ("Deadline", event.get("startTime", "")),
-            ("Account", event.get("affectedAccount", "")),
+            ("Account", _format_account_display(event, routing)),
             ("Region", event.get("region", "")),
             ("Actionability", event.get("actionability", "")),
         ]
@@ -788,7 +799,7 @@ def build_ticket_content(
         metadata_pairs = [
             ("Service", event.get("service", "")),
             ("Deadline", event.get("startTime") or "Not specified"),
-            ("Account", _format_account_display(event)),
+            ("Account", _format_account_display(event, routing)),
             ("Region", event.get("region", "")),
             ("Actionability", event.get("actionability", "")),
             ("Scope", "Account-level notification (no specific resources identified)"),
