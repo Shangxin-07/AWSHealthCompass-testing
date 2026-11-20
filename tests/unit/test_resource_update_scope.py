@@ -95,3 +95,15 @@ def test_write_resources_reports_newly_resolved(env):
     assert sorted(second.newly_resolved) == [e["entityValue"] for e in ents("RESOLVED")]
     third = write_resources(res, camps, "C2", "resource-level", ents("RESOLVED"), {}, acct, "us-east-1", False, "t")
     assert third.newly_resolved == ()
+
+
+def test_ticket_write_never_creates_bare_rows(env):
+    orch, res, camps = env
+    existing = "arn:aws:ecs:us-east-1:610000000001:cluster/c0"
+    missing = "arn:aws:lambda:ap-southeast-2:610000000009:function:never-written"
+    orch._write_ticket_to_resources(res, CID, [{"trackingKey": existing}, {"arn": missing}],
+                                    "KAN-9", "https://x/browse/KAN-9", "now")
+    assert res.get_item(Key={"campaignId": CID, "trackingKey": existing})["Item"]["ticketId"] == "KAN-9"
+    assert "Item" not in res.get_item(Key={"campaignId": CID, "trackingKey": missing})
+    orch._write_back_resource_statuses(res, CID, [{"arn": missing, "status": "RESOLVED"}])
+    assert "Item" not in res.get_item(Key={"campaignId": CID, "trackingKey": missing})

@@ -43,7 +43,7 @@ from resolve_core.pagination import (
     determine_pagination_path,
     should_publish_sns,
 )
-from resolve_core.resources import write_resources, update_routed_via
+from resolve_core.resources import derive_tracking_key, write_resources, update_routed_via
 from resolve_core.tags import normalize_tags
 from resolve_core.dispatch import evaluate_dispatch, load_dispatch_config
 from resolve_core.routing import resolve_routing, derive_routed_via
@@ -345,6 +345,16 @@ def _resolve_routing_with_live_lookup(
 # ===================================================================
 
 
+def _event_region(detail: dict, envelope: dict) -> str:
+    """Event region: EventBridge Health events carry ``detail.eventRegion``
+    (and the envelope ``region``), not ``detail.region``."""
+    for value in (detail.get("region"), detail.get("eventRegion"),
+                  envelope.get("region") if isinstance(envelope, dict) else None):
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 def _build_standardized_event(
     detail: dict,
     entities: list,
@@ -364,10 +374,13 @@ def _build_standardized_event(
     for entity in entities:
         if not isinstance(entity, dict):
             continue
+        entity_value = entity.get("entityValue", "")
         resources.append({
-            "arn": entity.get("entityValue", ""),
-            "entityValue": entity.get("entityValue", ""),
-            "accountId": entity.get("awsAccountId", ""),
+            "arn": entity_value,
+            "entityValue": entity_value,
+            "trackingKey": derive_tracking_key(entity_value) if isinstance(entity_value, str) and entity_value else "",
+            # EventBridge entities carry no account; it is event-level.
+            "accountId": entity.get("awsAccountId") or detail.get("affectedAccount", ""),
             "status": entity.get("status", ""),
             "lastUpdatedTime": parse_health_date(
                 entity.get("lastUpdatedTime")
@@ -384,7 +397,7 @@ def _build_standardized_event(
             "eventTypeCode": detail.get("eventTypeCode", ""),
             "eventTypeCategory": detail.get("eventTypeCategory", ""),
             "service": detail.get("service", ""),
-            "region": detail.get("region", ""),
+            "region": _event_region(detail, envelope),
             "affectedAccount": detail.get("affectedAccount", ""),
             "startTime": parse_health_date(detail.get("startTime")) or "",
             "endTime": parse_health_date(detail.get("endTime")) or "",
@@ -671,7 +684,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
 
         # --- (i) WRITE RESOURCES ---
         affected_account = detail.get("affectedAccount", "")
-        event_region = detail.get("region", "")
+        event_region = _event_region(detail, envelope)
         is_new = campaign_result.action == "CREATED"
 
         write_result = write_resources(

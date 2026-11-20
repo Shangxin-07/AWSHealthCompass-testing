@@ -1,0 +1,35 @@
+{
+  "version": "0",
+  "id": "7bf73129-1428-4cd3-a780-95db273d1602",
+  "detail-type": "AWS Health Event",
+  "source": "aws.health",
+  "account": "123456789012",
+  "time": "2026-11-20T03:06:00Z",
+  "region": "ap-southeast-2",
+  "resources": [
+    "arn:aws:lambda:ap-southeast-2:123456789012:function:ExampleStack-CustomResourceProvider-AbCdEf123456",
+    "arn:aws:lambda:ap-southeast-2:123456789012:function:ExampleStack-AutoDeleteObjectsHandler-GhIjKl789012"
+  ],
+  "detail": {
+    "eventArn": "arn:aws:health:ap-southeast-2::event/LAMBDA/AWS_LAMBDA_PLANNED_LIFECYCLE_EVENT/AWS_LAMBDA_PLANNED_LIFECYCLE_EVENT_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "service": "LAMBDA",
+    "eventScopeCode": "ACCOUNT_SPECIFIC",
+    "communicationId": "0123456789abcdef0123456789abcdef01234567",
+    "lastUpdatedTime": "Thu, 20 Nov 2026 03:05:00 GMT",
+    "eventRegion": "ap-southeast-2",
+    "eventTypeCode": "AWS_LAMBDA_PLANNED_LIFECYCLE_EVENT",
+    "eventTypeCategory": "scheduledChange",
+    "startTime": "Mon, 1 Sep 2025 08:00:00 GMT",
+    "eventDescription": [{
+      "language": "en_US",
+      "latestDescription": "Example: one or more Lambda functions use a runtime that is reaching end of support."
+    }],
+    "affectedEntities": [
+      {"entityValue": "arn:aws:lambda:ap-southeast-2:123456789012:function:ExampleStack-CustomResourceProvider-AbCdEf123456",
+       "lastUpdatedTime": "Thu, 20 Nov 2026 03:05:00 GMT", "status": "PENDING"},
+      {"entityValue": "arn:aws:lambda:ap-southeast-2:123456789012:function:ExampleStack-AutoDeleteObjectsHandler-GhIjKl789012",
+       "lastUpdatedTime": "Thu, 20 Nov 2026 03:05:00 GMT", "status": "PENDING"}
+    ],
+    "affectedAccount": "123456789012"
+  }
+}

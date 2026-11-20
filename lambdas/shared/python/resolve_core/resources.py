@@ -91,6 +91,7 @@ class WriteResult(NamedTuple):
 # --- Public API ---
 
 __all__ = [
+    "derive_tracking_key",
     "write_resources",
     "update_resource_status",
     "update_routed_via",
@@ -156,6 +157,7 @@ def write_resources(
     else:
         items = _build_resource_items(
             campaign_id, entities, account_tags, event_region, now,
+            affected_account=affected_account,
         )
         if not items:
             logger.info(
@@ -458,8 +460,16 @@ def _build_resource_items(
     account_tags: dict,
     event_region: str,
     now: str,
+    affected_account: Any = None,
 ) -> List[dict]:
-    """Build validated ResourcesTable items from entity list."""
+    """Build validated ResourcesTable items from entity list.
+
+    The account comes from the entity's ``awsAccountId`` when present (Health
+    API / reconciliation shape), else from the event's ``affectedAccount``:
+    EventBridge Health events carry the account once, at event level, and
+    their ``affectedEntities`` have no account field.
+    """
+    fallback_account = _validate_account_id(affected_account)
     safe_account_tags = _check_tag_payload_size(normalize_tags(account_tags))
     ttl = int(time.time()) + _TTL_SECONDS
     items = []
@@ -478,7 +488,7 @@ def _build_resource_items(
             )
             continue
 
-        account_id = _validate_account_id(entity.get("awsAccountId"))
+        account_id = _validate_account_id(entity.get("awsAccountId")) or fallback_account
         if account_id is None:
             logger.warning(
                 "Skipping resource with invalid accountId — "
@@ -799,3 +809,8 @@ def _compute_and_update_counts(
             )
 
     return counts
+
+
+# Public name: the ResourcesTable sort key for an entity value (used by the
+# Processor so ITSM handlers address exactly the row it wrote).
+derive_tracking_key = _derive_tracking_key
