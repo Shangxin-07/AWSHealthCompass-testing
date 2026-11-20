@@ -15,6 +15,8 @@ from urllib.parse import unquote
 import boto3
 from botocore.exceptions import ClientError
 
+from resolve_core import campaign_stats
+
 try:
     from resolve_core.grouping import group_resources
 except ImportError:
@@ -51,6 +53,11 @@ logger = logging.getLogger(__name__)
 CONFIG_TABLE = os.environ.get("CONFIG_TABLE", "compass-config")
 CAMPAIGNS_TABLE = os.environ.get("CAMPAIGNS_TABLE", "compass-campaigns")
 RESOURCES_TABLE = os.environ.get("RESOURCES_TABLE", "compass-resources")
+STATS_TABLE = os.environ.get("STATS_TABLE", "")
+
+# Campaign detail embeds at most this many resources; the full list is paged
+# via GET /api/campaigns/{id}/resources.
+_DETAIL_RESOURCE_LIMIT = 100
 JIRA_SECRET_ARN = os.environ.get("JIRA_SECRET_ARN", "")
 RECONCILIATION_FUNCTION_NAME = os.environ.get("RECONCILIATION_FUNCTION_NAME", "")
 SYNC_FUNCTION_NAME = os.environ.get("SYNC_FUNCTION_NAME", "")
@@ -246,6 +253,26 @@ def handle_campaigns_list(event, context):
     return _success(200, campaigns)
 
 
+def _stats_table():
+    return _dynamodb.Table(STATS_TABLE) if STATS_TABLE else None
+
+
+def _campaign_stats_items(campaign: dict) -> list:
+    """Per-account stats for a campaign, recounting once if never tracked."""
+    table = _stats_table()
+    if table is None:
+        return []
+    try:
+        return campaign_stats.ensure_stats(
+            _dynamodb.Table(RESOURCES_TABLE), table,
+            _dynamodb.Table(CAMPAIGNS_TABLE), campaign, _now_iso(),
+        )
+    except ClientError:
+        logger.exception("Failed to read campaign stats for %s",
+                         campaign.get("campaignId", "")[:256])
+        return []
+
+
 def handle_campaign_detail(event, context):
     """GET /api/campaigns/{id} — campaign detail with resources and breakdown."""
     campaign_id = unquote((event.get("pathParameters") or {}).get("id", ""))
@@ -264,35 +291,42 @@ def handle_campaign_detail(event, context):
     if not campaign:
         return _error(404, "NOT_FOUND", f"Campaign '{campaign_id}' not found.")
 
-    # Get resources
+    # First page of resources only; the full list is paged via /resources.
     try:
         from boto3.dynamodb.conditions import Key
         resources_table = _dynamodb.Table(RESOURCES_TABLE)
         res_resp = resources_table.query(
-            KeyConditionExpression=Key("campaignId").eq(campaign_id)
+            KeyConditionExpression=Key("campaignId").eq(campaign_id),
+            Limit=_DETAIL_RESOURCE_LIMIT,
         )
         resources = res_resp.get("Items", [])
+        truncated = "LastEvaluatedKey" in res_resp
     except ClientError:
         logger.exception("Failed to query resources for %s", campaign_id)
-        resources = []
+        resources, truncated = [], False
 
-    # Compute breakdown by accountId
+    # Per-account breakdown from compass-campaign-stats (no full scan).
+    stats = _campaign_stats_items(campaign)
     breakdown = {}
-    for r in resources:
-        acct = r.get("accountId", "unknown")
-        if acct not in breakdown:
-            breakdown[acct] = {"total": 0, "pending": 0, "resolved": 0}
-        breakdown[acct]["total"] += 1
-        status = (r.get("status", "PENDING") or "PENDING").upper()
-        if status == "RESOLVED":
-            breakdown[acct]["resolved"] += 1
-        else:
-            breakdown[acct]["pending"] += 1
+    ticketable_accounts = 0
+    for it in stats:
+        acct = campaign_stats.summarize_account(it)
+        # Display semantics: anything not resolved is pending (incl. account-level rows).
+        breakdown[acct["accountId"]] = {
+            "total": acct["total"], "pending": acct["total"] - acct["resolved"],
+            "resolved": acct["resolved"],
+        }
+        if acct["unticketedUnresolved"] > 0:
+            ticketable_accounts += 1
 
     platform = operative_platform(resolve_platforms(_config_table()))
     result = _format_campaign(campaign)
     result["resources"] = [_format_resource(r, platform) for r in resources]
+    result["resourcesTruncated"] = truncated
     result["groupBreakdown"] = breakdown
+    # Accounts with unticketed, unresolved resources. Ticket statuses are
+    # refreshed by the hourly Sync, so this can briefly overstate.
+    result["ticketableAccounts"] = ticketable_accounts
     return _success(200, result)
 
 
@@ -1250,16 +1284,17 @@ def handle_campaign_resources(event, context):
     if account_filter and not re.match(r"^\d{12}$", account_filter):
         return _error(400, "INVALID_PARAM", "accountId must be exactly 12 digits.")
 
-    # Validate nextToken (base64-encoded integer offset)
-    offset = 0
+    # Validate nextToken (base64url JSON of DynamoDB's LastEvaluatedKey)
+    start_key = None
     raw_token = params.get("nextToken")
     if raw_token:
         try:
-            decoded = base64.urlsafe_b64decode(raw_token).decode("utf-8")
-            offset = int(decoded)
-        except (ValueError, TypeError, Exception):
+            start_key = json.loads(base64.urlsafe_b64decode(raw_token).decode("utf-8"))
+        except (ValueError, TypeError, UnicodeDecodeError):
             return _error(400, "INVALID_PARAM", "nextToken is invalid.")
-        if offset < 0:
+        if (not isinstance(start_key, dict) or set(start_key) != {"campaignId", "trackingKey"}
+                or start_key.get("campaignId") != campaign_id
+                or not isinstance(start_key.get("trackingKey"), str)):
             return _error(400, "INVALID_PARAM", "nextToken is invalid.")
 
     # Verify campaign exists
@@ -1276,46 +1311,46 @@ def handle_campaign_resources(event, context):
 
     total_count = int(campaign.get("totalResourceCount", 0) or 0)
 
-    # Query all resources for campaign
+    # One page via DynamoDB pagination. DynamoDB applies Limit before the
+    # filter, so ask for exactly what is still missing each round; the last
+    # evaluated key then marks precisely where the page ended.
+    from boto3.dynamodb.conditions import Attr, Key
+    filt = None
+    if status_filter:
+        filt = Attr("healthStatus").eq(status_filter)
+    if account_filter:
+        cond = Attr("accountId").eq(account_filter)
+        filt = cond if filt is None else filt & cond
+    page, last_key = [], start_key
     try:
-        from boto3.dynamodb.conditions import Key
         resources_table = _dynamodb.Table(RESOURCES_TABLE)
-        all_resources = []
-        query_kwargs = {"KeyConditionExpression": Key("campaignId").eq(campaign_id)}
-        while True:
-            res_resp = resources_table.query(**query_kwargs)
-            all_resources.extend(res_resp.get("Items", []))
+        for _ in range(_RESOURCE_PAGE_MAX_ROUNDS):
+            kw = {"KeyConditionExpression": Key("campaignId").eq(campaign_id),
+                  "Limit": limit - len(page)}
+            if filt is not None:
+                kw["FilterExpression"] = filt
+            if last_key:
+                kw["ExclusiveStartKey"] = last_key
+            res_resp = resources_table.query(**kw)
+            page.extend(res_resp.get("Items", []))
             last_key = res_resp.get("LastEvaluatedKey")
-            if not last_key:
+            if not last_key or len(page) >= limit:
                 break
-            query_kwargs["ExclusiveStartKey"] = last_key
     except ClientError:
         logger.exception("Failed to query resources for %s", campaign_id)
         return _error(500, "SYS_INTERNAL_ERROR", "Failed to read resources.")
 
-    # Apply filters
-    if status_filter or account_filter:
-        filtered = []
-        for r in all_resources:
-            if status_filter:
-                r_status = (r.get("status", r.get("healthStatus", "")) or "").upper()
-                if r_status != status_filter:
-                    continue
-            if account_filter:
-                if r.get("accountId", "") != account_filter:
-                    continue
-            filtered.append(r)
-    else:
-        filtered = all_resources
-
-    filtered_count = len(filtered)
-
-    # Paginate
-    page = filtered[offset:offset + limit]
-    has_more = offset + limit < filtered_count
     next_token = None
-    if has_more:
-        next_token = base64.urlsafe_b64encode(str(offset + limit).encode("utf-8")).decode("utf-8")
+    if last_key:
+        next_token = base64.urlsafe_b64encode(
+            json.dumps({"campaignId": last_key["campaignId"],
+                        "trackingKey": last_key["trackingKey"]}).encode("utf-8")
+        ).decode("utf-8")
+
+    # filteredCount from per-account stats where derivable, else None.
+    filtered_count = total_count
+    if status_filter or account_filter:
+        filtered_count = _filtered_count(campaign, status_filter, account_filter)
 
     platform = operative_platform(resolve_platforms(_config_table()))
 
@@ -1326,6 +1361,22 @@ def handle_campaign_resources(event, context):
         "totalCount": total_count,
         "filteredCount": filtered_count,
     })
+
+
+# Upper bound on filtered query rounds per page (each round reads at most
+# `limit` rows), so a sparse filter cannot run a request into the timeout.
+_RESOURCE_PAGE_MAX_ROUNDS = 25
+
+
+def _filtered_count(campaign: dict, status_filter, account_filter):
+    """Count for the active filters from per-account stats, or None."""
+    if status_filter not in (None, "PENDING", "RESOLVED"):
+        return None  # stats track pending/resolved only
+    items = _campaign_stats_items(campaign)
+    if account_filter:
+        items = [i for i in items if i.get("accountId") == account_filter]
+    field = {"PENDING": "pending", "RESOLVED": "resolved", None: "total"}[status_filter]
+    return sum(int(i.get(field, 0) or 0) for i in items)
 
 
 def handle_campaign_breakdown(event, context):
@@ -1353,42 +1404,16 @@ def handle_campaign_breakdown(event, context):
         return _error(404, "NOT_FOUND", f"Campaign '{campaign_id}' not found.")
 
     campaign_type = campaign.get("campaignType", "resource-level")
+    stats = [campaign_stats.summarize_account(i) for i in _campaign_stats_items(campaign)]
 
-    # Query all resources (paginated)
-    try:
-        from boto3.dynamodb.conditions import Key
-        resources_table = _dynamodb.Table(RESOURCES_TABLE)
-        resources = []
-        query_kwargs = {"KeyConditionExpression": Key("campaignId").eq(campaign_id)}
-        while True:
-            res_resp = resources_table.query(**query_kwargs)
-            resources.extend(res_resp.get("Items", []))
-            last_key = res_resp.get("LastEvaluatedKey")
-            if not last_key:
-                break
-            query_kwargs["ExclusiveStartKey"] = last_key
-    except ClientError:
-        logger.exception("Failed to query resources for %s", campaign_id)
-        return _error(500, "SYS_INTERNAL_ERROR", "Failed to read resources.")
-
-    # Handle account-level campaigns with no resources
-    if not resources and campaign_type == "account-level":
-        acct = campaign.get("affectedAccount", "unknown")
-        status = (campaign.get("status", "active") or "active").lower()
-        resolved = 1 if status == "resolved" else 0
-        pending = 0 if resolved else 1
-        resources = [{"accountId": acct, "status": "RESOLVED" if resolved else "PENDING", "ticketStatus": "none"}]
-
-    # Compute totals
-    total_resources = len(resources)
-    resolved_resources = sum(1 for r in resources if (r.get("status") or "PENDING").upper() == "RESOLVED")
+    total_resources = sum(a["total"] for a in stats)
+    resolved_resources = sum(a["resolved"] for a in stats)
     completion_pct = round((resolved_resources / total_resources) * 100, 1) if total_resources > 0 else 0.0
 
-    # Build groups
     if group_by == "accountId":
-        groups = _breakdown_by_account(resources)
+        groups = _breakdown_by_account(stats)
     else:
-        groups = _breakdown_by_ticket_status(resources)
+        groups = _breakdown_by_ticket_status(_campaign_stats_items(campaign))
 
     return _success(200, {
         "campaignId": campaign_id,
@@ -1400,71 +1425,40 @@ def handle_campaign_breakdown(event, context):
     })
 
 
-def _breakdown_by_account(resources: list) -> list:
-    """Group resources by accountId, enrich with account names, sort by pending desc."""
-    groups = {}
-    for r in resources:
-        acct = r.get("accountId", "unknown")
-        if acct not in groups:
-            groups[acct] = {"total": 0, "pending": 0, "resolved": 0, "ticketStatus": {}}
-        groups[acct]["total"] += 1
-        if (r.get("status") or "PENDING").upper() == "RESOLVED":
-            groups[acct]["resolved"] += 1
-        else:
-            groups[acct]["pending"] += 1
-        ts = r.get("ticketStatus", "none")
-        groups[acct]["ticketStatus"][ts] = groups[acct]["ticketStatus"].get(ts, 0) + 1
-
-    # Enrich account names from ConfigTable
-    account_names = _get_account_names(list(groups.keys()))
-
+def _breakdown_by_account(accounts: list) -> list:
+    """Per-account groups from summarized stats, named, sorted by pending desc."""
+    account_names = _get_account_names([a["accountId"] for a in accounts if a["accountId"] != "unknown"])
     result = []
-    for acct_id, data in groups.items():
-        total = data["total"]
-        resolved = data["resolved"]
+    for a in accounts:
+        total, resolved = a["total"], a["resolved"]
         result.append({
-            "groupKey": acct_id,
-            "groupLabel": account_names.get(acct_id, acct_id),
+            "groupKey": a["accountId"],
+            "groupLabel": account_names.get(a["accountId"], a["accountId"]),
             "total": total,
-            "pending": data["pending"],
+            "pending": total - resolved,  # not resolved (incl. account-level rows)
             "resolved": resolved,
             "completionPct": round((resolved / total) * 100, 1) if total > 0 else 0.0,
-            "ticketStatus": data["ticketStatus"],
+            "ticketStatus": a["ticketStatus"],
         })
-
     result.sort(key=lambda g: (-g["pending"], -g["total"], g["groupKey"]))
     return result
 
 
-def _breakdown_by_ticket_status(resources: list) -> list:
-    """Group resources by ticketStatus."""
+def _breakdown_by_ticket_status(stats_items: list) -> list:
+    """Groups per ticket status, summed across accounts from stats."""
     label_map = {"none": "No Ticket", "Created": "Created", "In Progress": "In Progress", "Closed": "Closed"}
-    groups = {}
-    for r in resources:
-        ts = r.get("ticketStatus", "none")
-        if ts not in groups:
-            groups[ts] = {"total": 0, "pending": 0, "resolved": 0, "ticketStatus": {}}
-        groups[ts]["total"] += 1
-        if (r.get("status") or "PENDING").upper() == "RESOLVED":
-            groups[ts]["resolved"] += 1
-        else:
-            groups[ts]["pending"] += 1
-        groups[ts]["ticketStatus"][ts] = groups[ts]["ticketStatus"].get(ts, 0) + 1
-
     result = []
-    for ts_key, data in groups.items():
-        total = data["total"]
-        resolved = data["resolved"]
+    for ts_key, g in campaign_stats.ticket_status_groups(stats_items).items():
+        total, resolved = g["total"], g["resolved"]
         result.append({
             "groupKey": ts_key,
             "groupLabel": label_map.get(ts_key, ts_key),
             "total": total,
-            "pending": data["pending"],
+            "pending": g["pending"],
             "resolved": resolved,
             "completionPct": round((resolved / total) * 100, 1) if total > 0 else 0.0,
-            "ticketStatus": data["ticketStatus"],
+            "ticketStatus": {ts_key: total},
         })
-
     result.sort(key=lambda g: (-g["pending"], -g["total"], g["groupKey"]))
     return result
 

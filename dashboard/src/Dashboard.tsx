@@ -24,6 +24,20 @@ import CreateTicketsModal from './CreateTicketsModal';
 
 interface Props { campaigns: Campaign[]; config: OnboardingConfig | null; onRefresh: () => void; notify: (t: string, m: string) => void; onNavigate: (page: string) => void; onSync: () => void; onSplitPanelChange: (panel: React.ReactNode) => void; }
 
+/** /breakdown returns `groups` (one per account, with a resolved name);
+ *  shape them for the Account Breakdown tab, labelled "name (id)". */
+export function groupsToBreakdown(data: any): Record<string, GroupData> {
+  if (data && Array.isArray(data.groups)) {
+    const out: Record<string, GroupData> = {};
+    for (const g of data.groups) {
+      const key = g.groupLabel && g.groupLabel !== g.groupKey ? `${g.groupLabel} (${g.groupKey})` : String(g.groupKey);
+      out[key] = { total: g.total ?? 0, resolved: g.resolved ?? 0, pending: g.pending ?? 0 };
+    }
+    return out;
+  }
+  return (data && data.breakdown) || {};
+}
+
 export default function Dashboard({ campaigns, config, onRefresh, notify, onNavigate, onSync, onSplitPanelChange }: Props) {
   const labels = usePlatformLabels();
   const [filter, setFilter] = useState('');
@@ -37,6 +51,10 @@ export default function Dashboard({ campaigns, config, onRefresh, notify, onNavi
   const [breakdownLoading, setBreakdownLoading] = useState(false);
   const [resourcesError, setResourcesError] = useState<string | null>(null);
   const [breakdownError, setBreakdownError] = useState<string | null>(null);
+  // Resources are paged server-side: nextToken for "Load more", totalCount for the tab label.
+  const [resourcesNext, setResourcesNext] = useState<string | null>(null);
+  const [resourcesTotal, setResourcesTotal] = useState<number | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   // Headline orphan signal is the TICKET count from the sync-backed
   // orphan-status contract, gated by the backend-owned thresholdExceeded boolean.
   const [orphanStatus, setOrphanStatus] = useState<OrphanStatus>({
@@ -75,7 +93,15 @@ export default function Dashboard({ campaigns, config, onRefresh, notify, onNavi
               : <StatusIndicator type="pending">Pending</StatusIndicator> },
             { id: 'ticket', header: labels.ticketColumn, cell: (r: Resource) => r.ticketId || r.jiraTicketKey || '—' },
             { id: 'ticketStatus', header: labels.statusColumn, cell: (r: Resource) => r.ticketStatus === 'none' ? '—' : r.jiraStatusName || r.ticketStatus },
-          ]} empty={<Box>No resources</Box>} />
+          ]} empty={<Box>No resources</Box>}
+          footer={resourcesNext ? (
+            <Box textAlign="center">
+              <SpaceBetween size="xs" direction="horizontal">
+                <Box variant="small">Showing {resources.length}{resourcesTotal != null ? ` of ${resourcesTotal}` : ''}</Box>
+                <Button onClick={loadMoreResources} loading={loadingMore}>Load more</Button>
+              </SpaceBetween>
+            </Box>
+          ) : undefined} />
         );
       })();
 
@@ -116,7 +142,7 @@ export default function Dashboard({ campaigns, config, onRefresh, notify, onNavi
                 )}
               </SpaceBetween>
             )},
-            { label: `Resources${resources ? ` (${resources.length})` : ''}`, id: 'resources', content: resourcesTab },
+            { label: `Resources${resources ? ` (${resourcesTotal ?? resources.length})` : ''}`, id: 'resources', content: resourcesTab },
             { label: 'Account Breakdown', id: 'breakdown', content: breakdownTab },
           ]} />
         </SplitPanel>
@@ -124,7 +150,7 @@ export default function Dashboard({ campaigns, config, onRefresh, notify, onNavi
     } else {
       onSplitPanelChange(null);
     }
-  }, [selected, detail, resources, breakdown, resourcesLoading, breakdownLoading, resourcesError, breakdownError]);
+  }, [selected, detail, resources, breakdown, resourcesLoading, breakdownLoading, resourcesError, breakdownError, resourcesNext, resourcesTotal, loadingMore]);
 
   const filtered = campaigns.filter(c => {
     const q = filter.toLowerCase();
@@ -135,6 +161,7 @@ export default function Dashboard({ campaigns, config, onRefresh, notify, onNavi
   const loadDetail = async (c: Campaign) => {
     setSelected(c);
     setResources(null); setBreakdown(null);
+    setResourcesNext(null); setResourcesTotal(null);
     setResourcesError(null); setBreakdownError(null);
     setResourcesLoading(true); setBreakdownLoading(true);
 
@@ -146,15 +173,31 @@ export default function Dashboard({ campaigns, config, onRefresh, notify, onNavi
 
     // Fetch resources (parallel)
     apiFetch(`/campaigns/${id}/resources`)
-      .then(data => setResources(data.resources || []))
+      .then(data => {
+        setResources(data.resources || []);
+        setResourcesNext(data.nextToken || null);
+        setResourcesTotal(typeof data.totalCount === 'number' ? data.totalCount : null);
+      })
       .catch(e => setResourcesError(e.message))
       .finally(() => setResourcesLoading(false));
 
     // Fetch breakdown (parallel)
     apiFetch(`/campaigns/${id}/breakdown`)
-      .then(data => setBreakdown(data.breakdown || {}))
+      .then(data => setBreakdown(groupsToBreakdown(data)))
       .catch(e => setBreakdownError(e.message))
       .finally(() => setBreakdownLoading(false));
+  };
+
+  const loadMoreResources = async () => {
+    if (!selected || !resourcesNext) return;
+    setLoadingMore(true);
+    try {
+      const id = encodeURIComponent(selected.campaignId);
+      const data = await apiFetch(`/campaigns/${id}/resources?limit=200&nextToken=${encodeURIComponent(resourcesNext)}`);
+      setResources(prev => [...(prev || []), ...(data.resources || [])]);
+      setResourcesNext(data.nextToken || null);
+    } catch (e: any) { setResourcesError(e.message); }
+    finally { setLoadingMore(false); }
   };
 
   const active = campaigns.filter(c => c.status === 'active').length;

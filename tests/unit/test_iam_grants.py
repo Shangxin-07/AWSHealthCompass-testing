@@ -54,3 +54,18 @@ def _actions_for_role(template, role_logical_prefix):
 def test_sync_role_can_build_ticket_index(api_template):
     actions = _actions_for_role(api_template, "SyncLambdaServiceRole")
     assert {"dynamodb:Query", "dynamodb:BatchGetItem"} <= actions, sorted(actions)
+
+
+def _resources_for_role(template, role_logical_prefix):
+    out = []
+    for res in template["Resources"].values():
+        if res["Type"] == "AWS::IAM::Policy" and role_logical_prefix in json.dumps(res["Properties"].get("Roles", [])):
+            out.append(json.dumps(res["Properties"]["PolicyDocument"]))
+    return "\n".join(out)
+
+
+@pytest.mark.parametrize("role", ["SyncLambdaServiceRole", "ReconciliationLambdaServiceRole", "ApiLambdaServiceRole"])
+def test_stats_table_access(api_template, role):
+    actions = _actions_for_role(api_template, role)
+    assert {"dynamodb:Query", "dynamodb:UpdateItem", "dynamodb:BatchWriteItem"} <= actions, sorted(actions)
+    assert "CampaignStatsTable" in _resources_for_role(api_template, role)

@@ -50,6 +50,9 @@ export default function Campaigns({ campaigns, config, onRefresh, notify, onSync
                 { id: 'status', header: labels.statusColumn, cell: (r: any) => r.jiraStatusName || r.ticketStatus || '—' },
               ]} />
             )}
+            {detail.resourcesTruncated && (
+              <Box variant="small">Showing the first {detail.resources?.length ?? 0} of {detail.totalResources} resources.</Box>
+            )}
           </SpaceBetween>
         </SplitPanel>
       );

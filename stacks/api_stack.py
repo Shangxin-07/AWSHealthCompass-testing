@@ -40,6 +40,7 @@ class ApiStack(cdk.Stack):
                  campaigns_table: dynamodb.Table,
                  resources_table: dynamodb.Table,
                  config_table: dynamodb.Table,
+                 stats_table: dynamodb.Table,
                  jira_secret: secretsmanager.Secret,
                  integration_topic: sns.Topic,
                  payload_bucket: s3.Bucket,
@@ -89,6 +90,7 @@ class ApiStack(cdk.Stack):
             environment={
                 "CAMPAIGNS_TABLE": campaigns_table.table_name,
                 "RESOURCES_TABLE": resources_table.table_name,
+                "STATS_TABLE": stats_table.table_name,
                 "CONFIG_TABLE": config_table.table_name,
                 "JIRA_SECRET_ARN": jira_secret.secret_arn,
                 "LOG_LEVEL": log_level,
@@ -96,7 +98,9 @@ class ApiStack(cdk.Stack):
         )
 
         # IAM — least privilege
-        campaigns_table.grant(self.sync_fn, "dynamodb:GetItem", "dynamodb:UpdateItem")
+        # Query: status-updatedAt-index, to find open campaigns for the stats recount.
+        campaigns_table.grant(self.sync_fn, "dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:Query")
+        stats_table.grant_read_write_data(self.sync_fn)
         # BatchGetItem: the ticket index is built from ticketStatus-index keys
         # + BatchGetItem (lambdas/sync/handler.py::_batch_get_items).
         resources_table.grant(
@@ -146,6 +150,7 @@ class ApiStack(cdk.Stack):
             environment={
                 "CAMPAIGNS_TABLE": campaigns_table.table_name,
                 "RESOURCES_TABLE": resources_table.table_name,
+                "STATS_TABLE": stats_table.table_name,
                 "CONFIG_TABLE": config_table.table_name,
                 "INTEGRATION_TOPIC_ARN": integration_topic.topic_arn,
                 "PAYLOAD_BUCKET": payload_bucket.bucket_name,
@@ -156,6 +161,7 @@ class ApiStack(cdk.Stack):
         # IAM — DynamoDB: full CRUD on campaigns/resources, restricted on config
         campaigns_table.grant_read_write_data(self.reconciliation_fn)
         resources_table.grant_read_write_data(self.reconciliation_fn)
+        stats_table.grant_read_write_data(self.reconciliation_fn)
         config_table.grant(
             self.reconciliation_fn,
             "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Scan",
@@ -292,6 +298,7 @@ class ApiStack(cdk.Stack):
             environment={
                 "CAMPAIGNS_TABLE": campaigns_table.table_name,
                 "RESOURCES_TABLE": resources_table.table_name,
+                "STATS_TABLE": stats_table.table_name,
                 "CONFIG_TABLE": config_table.table_name,
                 "JIRA_SECRET_ARN": jira_secret.secret_arn,
                 "CORS_ALLOW_ORIGIN": cors_allow_origin,
@@ -307,6 +314,8 @@ class ApiStack(cdk.Stack):
         config_table.grant_read_write_data(self.api_lambda)
         campaigns_table.grant_read_write_data(self.api_lambda)
         resources_table.grant_read_write_data(self.api_lambda)
+        # Read for breakdowns; write for the one-time recount of pre-stats campaigns.
+        stats_table.grant_read_write_data(self.api_lambda)
         jira_secret.grant_read(self.api_lambda)
         jira_secret.grant_write(self.api_lambda)
         if servicenow_secret:

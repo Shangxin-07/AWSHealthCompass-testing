@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional
 import boto3
 from botocore.exceptions import ClientError
 
+from resolve_core import campaign_stats
 from resolve_core.campaign import recalculate_completion, update_campaign_status
 from resolve_core.config_schema import operative_platform, resolve_platforms
 from resolve_core.constants import (
@@ -50,6 +51,9 @@ logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
 _CONFIG_TABLE = os.environ.get("CONFIG_TABLE", "compass-config")
 _CAMPAIGNS_TABLE = os.environ.get("CAMPAIGNS_TABLE", "compass-campaigns")
+_STATS_TABLE = os.environ.get("STATS_TABLE", "")
+# Stop starting new campaign recounts when less than this remains.
+_RECOUNT_RESERVE_MS = 60_000
 _RESOURCES_TABLE = os.environ.get("RESOURCES_TABLE", "compass-resources")
 _JIRA_SECRET_ARN = os.environ.get("JIRA_SECRET_ARN", "")
 _AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
@@ -82,6 +86,7 @@ _secrets_client = boto3.client("secretsmanager", region_name=_AWS_REGION)
 
 _config_table = _dynamodb.Table(_CONFIG_TABLE)
 _campaigns_table = _dynamodb.Table(_CAMPAIGNS_TABLE)
+_stats_table = _dynamodb.Table(_STATS_TABLE) if _STATS_TABLE else None
 _resources_table = _dynamodb.Table(_RESOURCES_TABLE)
 
 # --- Module-level cache ---
@@ -899,7 +904,55 @@ def _sync_servicenow(now: str, start_time: float) -> dict:
 
 
 def lambda_handler(event: Any, context: Any) -> dict:
-    """Sync Lambda entry point. Triggered hourly by EventBridge."""
+    """Sync Lambda entry point. Triggered hourly by EventBridge.
+
+    1. Sync ticket status from the ITSM (may return early, e.g. no ITSM).
+    2. Recount per-account stats for open campaigns (always runs): heals
+       counter drift and refreshes ticket-status counts.
+    """
+    result = _sync_tickets(event, context)
+    try:
+        result["statsRecounted"] = _recount_open_campaigns(context, _now_iso())
+    except ClientError as exc:
+        logger.error("Stats recount failed — error_code=SYNC_STATS_RECOUNT_FAILED "
+                     "exception_type=%s", type(exc).__name__)
+        result["statsRecounted"] = 0
+    return result
+
+
+def _recount_open_campaigns(context: Any, now: str) -> int:
+    """Recount stats for ACTIVE/PARTIAL campaigns, within the time budget."""
+    if _stats_table is None:
+        return 0
+    getter = getattr(context, "get_remaining_time_in_millis", None)
+    done = 0
+    for status in ("ACTIVE", "PARTIAL"):
+        kw: Dict[str, Any] = {
+            "IndexName": "status-updatedAt-index",
+            "KeyConditionExpression": "#s = :s",
+            "ExpressionAttributeNames": {"#s": "status"},
+            "ExpressionAttributeValues": {":s": status},
+            "ProjectionExpression": "campaignId",
+        }
+        while True:
+            resp = _campaigns_table.query(**kw)
+            for item in resp.get("Items", []):
+                if getter is not None and getter() < _RECOUNT_RESERVE_MS:
+                    logger.warning("Stats recount stopped on time budget — done=%d", done)
+                    return done
+                campaign_stats.recount_campaign(
+                    _resources_table, _stats_table, _campaigns_table,
+                    item["campaignId"], now)
+                done += 1
+            if "LastEvaluatedKey" not in resp:
+                break
+            kw["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    logger.info("stats_recount_complete — campaigns=%d", done)
+    return done
+
+
+def _sync_tickets(event: Any, context: Any) -> dict:
+    """Ticket-status sync (Jira or ServiceNow)."""
     start_time = time.monotonic()
     now = _now_iso()
 
