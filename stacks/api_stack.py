@@ -567,6 +567,21 @@ class ApiStack(cdk.Stack):
             ),
             account_recovery=cognito.AccountRecovery.NONE,
             mfa=cognito.Mfa.OPTIONAL,
+            # Invitation email: username and temporary password each on their
+            # own line with nothing after them. The Cognito default ends the
+            # password with a full stop, which gets copied into the password.
+            user_invitation=cognito.UserInvitationConfig(
+                email_subject="Your Compass dashboard login",
+                email_body=(
+                    "An administrator has created a Compass dashboard account for you."
+                    "<br><br>Username:<br>{username}"
+                    "<br><br>Temporary password:<br>{####}"
+                    "<br><br>Sign in at "
+                    f"https://{dashboard_distribution.distribution_domain_name}"
+                    "<br>You will be asked to choose a new password: at least 12 "
+                    "characters with upper case, lower case, a digit and a symbol."
+                ),
+            ),
             removal_policy=(
                 RemovalPolicy.DESTROY
                 if self.node.try_get_context("ephemeral") == "true"
