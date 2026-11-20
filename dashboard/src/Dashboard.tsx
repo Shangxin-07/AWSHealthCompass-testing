@@ -11,6 +11,7 @@ import Container from '@cloudscape-design/components/container';
 import Tabs from '@cloudscape-design/components/tabs';
 import Badge from '@cloudscape-design/components/badge';
 import Button from '@cloudscape-design/components/button';
+import SystemStatus from './SystemStatus';
 import ProgressBar from '@cloudscape-design/components/progress-bar';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import Alert from '@cloudscape-design/components/alert';
@@ -228,6 +229,7 @@ export default function Dashboard({ campaigns, config, onRefresh, notify, onNavi
   return (
     <SpaceBetween size="l">
       <Header variant="h1" actions={<Button onClick={onSync} iconName="refresh">Sync</Button>}>Health Events Dashboard</Header>
+      <SystemStatus />
 
       {config && !connectionReady && (
         <Alert type="warning" action={<Button onClick={() => onNavigate('configuration')}>Go to Configuration</Button>}>

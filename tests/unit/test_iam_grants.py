@@ -69,3 +69,8 @@ def test_stats_table_access(api_template, role):
     actions = _actions_for_role(api_template, role)
     assert {"dynamodb:Query", "dynamodb:UpdateItem", "dynamodb:BatchWriteItem"} <= actions, sorted(actions)
     assert "CampaignStatsTable" in _resources_for_role(api_template, role)
+
+
+def test_api_role_can_read_system_status(api_template):
+    actions = _actions_for_role(api_template, "ApiLambdaServiceRole")
+    assert {"sqs:GetQueueUrl", "sqs:GetQueueAttributes", "cloudwatch:DescribeAlarms"} <= actions, sorted(actions)
