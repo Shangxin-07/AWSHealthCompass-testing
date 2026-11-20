@@ -325,6 +325,17 @@ class ApiStack(cdk.Stack):
         payload_bucket.grant_read(self.api_lambda)
         # ONLY GetQueueAttributes — no consume/send
         ingestion_queue.grant(self.api_lambda, "sqs:GetQueueAttributes")
+        # System status: depths of the fixed-name Compass queues (incl. DLQs
+        # and integration queues in other stacks) and firing alarms.
+        self.api_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["sqs:GetQueueUrl", "sqs:GetQueueAttributes"],
+            resources=[cdk.Stack.of(self).format_arn(
+                service="sqs", resource="compass-*", arn_format=cdk.ArnFormat.NO_RESOURCE_NAME)],
+        ))
+        self.api_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["cloudwatch:DescribeAlarms"],
+            resources=["*"],  # DescribeAlarms has no resource-level permissions
+        ))
         # Organizations — no resource-level permissions available
         # organizations:ListAccounts does not support resource-level ARN constraints.
         self.api_lambda.add_to_role_policy(iam.PolicyStatement(
@@ -855,6 +866,9 @@ class ApiStack(cdk.Stack):
         api_root.add_resource("generate-events").add_method("POST", integration, **auth_opts)
 
         # /api/test/route (dry-run routing test)
+        api_root.add_resource("system").add_resource("status").add_method("GET", integration, **auth_opts)
+        api_root.add_resource("accounts").add_method("GET", integration, **auth_opts)
+
         test_resource = api_root.add_resource("test")
         test_resource.add_resource("route").add_method("POST", integration, **auth_opts)
         test_resource.add_resource("resource-status").add_method("POST", integration, **auth_opts)

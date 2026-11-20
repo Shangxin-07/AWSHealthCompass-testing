@@ -65,19 +65,17 @@ export default function Campaigns({ campaigns, config, onRefresh, notify, onSync
   const totalClosed = campaigns.reduce((s, c) => s + (c.ticketsClosedResources || 0), 0);
   const atRisk = campaigns.filter(c => daysLeft(c.deadline) <= 30 && daysLeft(c.deadline) >= 0).length;
 
-  // Aggregate by account across all campaigns
-  const byAccount = new Map<string, { total: number; resolved: number; campaigns: number }>();
-  for (const c of campaigns) {
-    if (c.groupBreakdown) {
-      for (const [acct, data] of Object.entries(c.groupBreakdown)) {
-        const prev = byAccount.get(acct) || { total: 0, resolved: 0, campaigns: 0 };
-        byAccount.set(acct, { total: prev.total + data.total, resolved: prev.resolved + data.resolved, campaigns: prev.campaigns + 1 });
-      }
-    } else if (c.affectedAccount) {
-      const prev = byAccount.get(c.affectedAccount) || { total: 0, resolved: 0, campaigns: 0 };
-      byAccount.set(c.affectedAccount, { total: prev.total + c.totalResources, resolved: prev.resolved + c.resolvedResources, campaigns: prev.campaigns + 1 });
-    }
-  }
+  // Per-account totals across active campaigns, from the per-account stats
+  // (the campaign list has no per-account data; using affectedAccount
+  // credited a whole org-wide campaign to its first account).
+  const [accounts, setAccounts] = useState<any[] | null>(null);
+  const [accountsError, setAccountsError] = useState<string | null>(null);
+  useEffect(() => {
+    if (view !== 'account') return;
+    apiFetch('/accounts?scope=active')
+      .then((d: any) => { setAccounts(d.accounts || []); setAccountsError(null); })
+      .catch((e: any) => setAccountsError(e.message));
+  }, [view, campaigns]);
 
   return (
     <SpaceBetween size="l">
@@ -122,13 +120,18 @@ export default function Campaigns({ campaigns, config, onRefresh, notify, onSync
 
       {view === 'account' && (
         <Table
-          items={[...byAccount.entries()].map(([acct, data]) => ({ acct, ...data }))}
+          loading={accounts === null && !accountsError}
+          loadingText="Loading accounts"
+          items={accounts || []}
+          header={accountsError ? <StatusIndicator type="error">{accountsError}</StatusIndicator> : undefined}
           columnDefinitions={[
-            { id: 'acct', header: 'Account', cell: (r: any) => r.acct },
-            { id: 'campaigns', header: 'Campaigns', cell: (r: any) => r.campaigns },
-            { id: 'progress', header: 'Progress', cell: (r: any) =>
+            { id: 'acct', header: 'Account', cell: (r: any) => r.name ? `${r.name} (${r.accountId})` : r.accountId },
+            { id: 'pending', header: 'Pending', cell: (r: any) => r.pending },
+            { id: 'progress', header: 'Resolved', cell: (r: any) =>
               <ProgressBar value={r.total > 0 ? (r.resolved / r.total) * 100 : 0} additionalInfo={`${r.resolved}/${r.total}`} /> },
-            { id: 'total', header: 'Total Resources', cell: (r: any) => r.total },
+            { id: 'campaigns', header: 'Campaigns', cell: (r: any) => r.campaignsWithPending === r.campaigns
+              ? r.campaigns : `${r.campaignsWithPending} of ${r.campaigns} with pending` },
+            { id: 'deadline', header: 'Nearest Deadline', cell: (r: any) => r.nearestDeadline ? formatDays(r.nearestDeadline) : '—' },
           ]}
           empty={<Box textAlign="center"><b>No account data</b></Box>}
         />

@@ -951,6 +951,14 @@ except ImportError:
 
 _ROUTES[("POST", "/api/test/route")] = _handle_test_route
 
+try:
+    from status_handlers import handle_accounts_summary, handle_system_status  # noqa: E402
+except ImportError:
+    from lambdas.api.status_handlers import handle_accounts_summary, handle_system_status  # noqa: E402
+
+_ROUTES[("GET", "/api/system/status")] = handle_system_status
+_ROUTES[("GET", "/api/accounts")] = handle_accounts_summary
+
 # ===================================================================
 # Setup timer endpoints
 # ===================================================================
