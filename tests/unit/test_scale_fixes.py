@@ -57,7 +57,7 @@ def test_ticket_index_uses_gsi_and_batch_get(sync):
     index = sync._build_ticket_index()
     assert set(index) == {"T-a", "T-b", "T-x"}
     assert len(seen_keys) == 3  # deduped
-    assert index["T-x"]["platform"] == "jira"
+    assert index["T-x"][0]["platform"] == "jira"
 
 
 def test_batch_get_retries_unprocessed(sync, monkeypatch):
