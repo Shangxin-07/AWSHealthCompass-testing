@@ -15,7 +15,7 @@ from urllib.parse import unquote
 import boto3
 from botocore.exceptions import ClientError
 
-from resolve_core import campaign_stats
+from resolve_core import campaign_stats, test_accounts
 
 try:
     from resolve_core.grouping import group_resources
@@ -1504,12 +1504,29 @@ def handle_generate_events(event, context):
 
     if single_event is None and count not in (10, 100, 1000):
         return _error(400, "INVALID_PARAM", "count must be one of: 10, 100, 1000")
+    if single_event is not None and not isinstance(single_event, dict):
+        return _error(400, "INVALID_PARAM", "singleEvent must be an object")
 
     generator_fn = os.environ.get("EVENT_GENERATOR_FUNCTION_NAME", "")
     if not generator_fn:
         return _error(400, "NOT_CONFIGURED", "Event generator not configured")
 
-    payload = {"count": 1, "singleEvent": single_event} if single_event else {"count": count}
+    # Bulk events use the named test accounts; a single event defaults to the
+    # first one. Register names for any catalogue account used (never
+    # overwriting an existing mapping) so tickets and breakdowns show them.
+    if single_event:
+        single_event = dict(single_event)
+        single_event["accountId"] = single_event.get("accountId") or test_accounts.TEST_ACCOUNT_IDS[0]
+        used = [single_event["accountId"]]
+        payload = {"count": 1, "singleEvent": single_event}
+    else:
+        used = test_accounts.TEST_ACCOUNT_IDS
+        payload = {"count": count, "accounts": used}
+    try:
+        registered = test_accounts.ensure_registered(_config_table(), used, _now_iso())
+    except ClientError:
+        logger.exception("Failed to register test account names")
+        registered = 0
 
     try:
         _lambda_client.invoke(
@@ -1521,7 +1538,18 @@ def handle_generate_events(event, context):
         logger.exception("Failed to invoke event generator Lambda")
         return _error(502, "INVOKE_FAILED", "Failed to trigger event generator.")
 
-    return _success(202, {"status": "triggered", "count": 1 if single_event else count, "published": 1 if single_event else count})
+    return _success(202, {"status": "triggered", "count": 1 if single_event else count,
+                          "published": 1 if single_event else count,
+                          "accounts": len(used), "namesRegistered": registered})
+
+
+def handle_test_accounts(event, context):
+    """GET /api/test/accounts — the named test accounts and their mappings."""
+    try:
+        return _success(200, {"accounts": test_accounts.list_accounts(_config_table())})
+    except ClientError:
+        logger.exception("Failed to read test accounts")
+        return _error(500, "SYS_INTERNAL_ERROR", "Failed to read test accounts.")
 
 
 # ===================================================================

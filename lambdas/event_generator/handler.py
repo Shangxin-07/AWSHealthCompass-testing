@@ -30,7 +30,9 @@ VALID_SCENARIOS = frozenset({
     "account_notification", "mixed",
 })
 
-DEFAULT_ACCOUNTS = ["111111111111", "222222222222", "333333333333"]
+# Named test accounts (keep in sync with resolve_core/test_accounts.py; the
+# generator has no shared layer). The API passes them explicitly for bulk runs.
+DEFAULT_ACCOUNTS = [f"6000000000{i:02d}" for i in range(1, 11)]
 DEFAULT_SERVICES = ["EKS", "RDS", "EC2", "LAMBDA", "ELASTICACHE", "S3"]
 
 
@@ -129,7 +131,7 @@ def _handle_single_event(spec: dict, context) -> dict:
         return _error(500, "MISSING_QUEUE_URL", "INGESTION_QUEUE_URL environment variable not set")
 
     service = spec.get("service", "EKS")
-    account_id = spec.get("accountId", "111111111111")
+    account_id = spec.get("accountId") or DEFAULT_ACCOUNTS[0]
     resource_tags = spec.get("resourceTags", {})
     account_tags = spec.get("accountTags", {})
     event_type_code = spec.get("eventTypeCode") or f"AWS_{service}_PLANNED_LIFECYCLE_EVENT"
@@ -203,7 +205,7 @@ def _handle_replay(specs):
             value, status = (e or {}).get("entityValue"), (e or {}).get("status")
             if not isinstance(value, str) or not 0 < len(value) <= 2048 or status not in _REPLAY_STATUSES:
                 return _error(400, "INVALID_REPLAY", "each entity needs an entityValue and status PENDING|RESOLVED")
-            resources.append({"entityValue": value, "awsAccountId": acct, "status": status,
+            resources.append({"entityValue": value, "status": status,
                               "lastUpdatedTime": time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime()),
                               "resourceTags": {}})
         events.append(make_health_event(

@@ -858,6 +858,7 @@ class ApiStack(cdk.Stack):
         test_resource = api_root.add_resource("test")
         test_resource.add_resource("route").add_method("POST", integration, **auth_opts)
         test_resource.add_resource("resource-status").add_method("POST", integration, **auth_opts)
+        test_resource.add_resource("accounts").add_method("GET", integration, **auth_opts)
 
         # /api/telemetry (Beta P1 Metrics)
         telemetry_api = api_root.add_resource("telemetry")

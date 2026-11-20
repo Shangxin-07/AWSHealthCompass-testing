@@ -49,3 +49,20 @@ def test_resources_variants():
     assert tagged[0]["resourceTags"] == {"Team": "x"}
     assert ":999999999999:" in tagged[0]["entityValue"]
     assert f.make_health_event(resource_count=0)["detail"]["affectedEntities"] == []
+
+
+def test_entities_have_no_per_entity_account_like_real_eventbridge():
+    f = _factory()
+    ev = f.make_health_event(affected_account="600000000001", resource_count=2)
+    assert ev["detail"]["affectedAccount"] == "600000000001"
+    assert all("awsAccountId" not in e for e in ev["detail"]["affectedEntities"])
+
+
+def test_entity_account_wins_when_present_health_api_shape():
+    from resolve_core.resources import _build_resource_items
+    items = _build_resource_items(
+        "C", [{"entityValue": "arn:aws:rds:us-east-1:222222222222:db:x", "awsAccountId": "222222222222",
+               "status": "PENDING"},
+              {"entityValue": "arn:aws:rds:us-east-1:111111111111:db:y", "status": "PENDING"}],
+        {}, "us-east-1", "now", affected_account="111111111111")
+    assert [i["accountId"] for i in items] == ["222222222222", "111111111111"]
