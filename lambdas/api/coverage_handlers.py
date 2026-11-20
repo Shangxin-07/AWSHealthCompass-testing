@@ -140,7 +140,7 @@ def handle_unroutable(event, context):
 
     try:
         scan_kwargs = {
-            "ProjectionExpression": "campaignId, trackingKey, accountId, routedVia, routingError",
+            "ProjectionExpression": "campaignId, trackingKey, entityValue, accountId, routedVia, routingError",
         }
         deadline = time.monotonic() + _SCAN_TIME_BUDGET_S
         while True:
@@ -151,7 +151,7 @@ def handle_unroutable(event, context):
                     total_unroutable += 1
                     if len(resources) < _UNROUTABLE_LIMIT:
                         resources.append({
-                            "resourceArn": item.get("trackingKey", ""),
+                            "resourceArn": _resource_label(item),
                             "accountId": item.get("accountId", ""),
                             "campaignId": item.get("campaignId", ""),
                             "reason": item.get("routingError") or _default_reason(item),
@@ -175,6 +175,22 @@ def handle_unroutable(event, context):
         "resources": resources,
         "partial": partial,
     })
+
+
+def _resource_label(item: dict) -> str:
+    """Display value for the Resource ARN column.
+
+    Account-level rows (account notifications with no specific resource)
+    have tracking key ``ACCOUNT#<id>`` and no entityValue; show that plainly
+    instead of leaking the internal key.
+    """
+    entity = item.get("entityValue")
+    if isinstance(entity, str) and entity:
+        return entity
+    tracking_key = item.get("trackingKey", "") or ""
+    if tracking_key.startswith("ACCOUNT#"):
+        return "(account-level)"
+    return tracking_key
 
 
 def _default_reason(item: dict) -> str:

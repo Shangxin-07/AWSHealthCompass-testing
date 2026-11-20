@@ -118,3 +118,13 @@ def test_coverage_partial_on_time_budget(coverage, monkeypatch):
 ])
 def test_extract_service(coverage, cid, expected):
     assert coverage._extract_service(cid) == expected
+
+
+@pytest.mark.parametrize("item,expected", [
+    ({"trackingKey": "ACCOUNT#500000000026", "entityValue": None}, "(account-level)"),
+    ({"trackingKey": "arn:aws:rds:us-east-1:1:db:x", "entityValue": "arn:aws:rds:us-east-1:1:db:x"}, "arn:aws:rds:us-east-1:1:db:x"),
+    ({"trackingKey": "SHA256:abc", "entityValue": "i-0123"}, "i-0123"),
+    ({"trackingKey": "SHA256:abc"}, "SHA256:abc"),
+])
+def test_resource_label(coverage, item, expected):
+    assert coverage._resource_label(item) == expected
