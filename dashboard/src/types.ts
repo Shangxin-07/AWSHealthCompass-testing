@@ -4,6 +4,8 @@ export interface Campaign {
   deadline: string; eventScopeCode?: string; actionability?: string;
   hasResources: boolean; createdAt?: string; status: string;
   totalResources: number; ticketedResources: number;
+  /** Distinct tickets created / closed for the campaign. */
+  ticketsCreated?: number; ticketsClosed?: number;
   resolvedResources: number; ticketsClosedResources?: number;
   affectedAccount?: string; resources?: Resource[];
   groupBreakdown?: Record<string, GroupData>;
@@ -14,7 +16,7 @@ export interface Campaign {
 }
 
 export interface Resource {
-  resourceArn: string; accountId: string; region: string;
+  resourceArn: string; accountId: string; accountName?: string; region: string;
   healthStatus: string; ticketStatus: string;
   ticketId?: string; ticketPlatform?: string; ticketUrl?: string;
   jiraStatusName?: string; jiraTicketKey?: string;

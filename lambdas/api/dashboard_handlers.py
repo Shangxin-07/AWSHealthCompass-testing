@@ -180,8 +180,11 @@ def _format_campaign(item: dict) -> dict:
         "hasResources": item.get("campaignType") == "resource-level",
         "totalResources": total,
         "resolvedResources": resolved,
+        # Legacy names: these hold ticket counts (distinct tickets), not resources.
         "ticketedResources": int(item.get("ticketsCreated", 0) or 0),
         "ticketsClosedResources": int(item.get("ticketsClosed", 0) or 0),
+        "ticketsCreated": int(item.get("ticketsCreated", 0) or 0),
+        "ticketsClosed": int(item.get("ticketsClosed", 0) or 0),
         "affectedAccount": item.get("affectedAccount", ""),
         "createdAt": item.get("createdAt", ""),
         # `campaignStatus` — TICKETING LOCK state
@@ -253,6 +256,14 @@ def handle_campaigns_list(event, context):
     return _success(200, campaigns)
 
 
+def _with_account_names(resources: list) -> list:
+    """Add accountName (from account mappings) to formatted resources."""
+    names = _get_account_names(sorted({r.get("accountId") for r in resources if r.get("accountId")}))
+    for r in resources:
+        r["accountName"] = names.get(r.get("accountId", ""), "")
+    return resources
+
+
 def _stats_table():
     return _dynamodb.Table(STATS_TABLE) if STATS_TABLE else None
 
@@ -321,7 +332,7 @@ def handle_campaign_detail(event, context):
 
     platform = operative_platform(resolve_platforms(_config_table()))
     result = _format_campaign(campaign)
-    result["resources"] = [_format_resource(r, platform) for r in resources]
+    result["resources"] = _with_account_names([_format_resource(r, platform) for r in resources])
     result["resourcesTruncated"] = truncated
     result["groupBreakdown"] = breakdown
     # Accounts with unticketed, unresolved resources. Ticket statuses are
@@ -1356,7 +1367,7 @@ def handle_campaign_resources(event, context):
 
     return _success(200, {
         "campaignId": campaign_id,
-        "resources": [_format_resource(r, platform) for r in page],
+        "resources": _with_account_names([_format_resource(r, platform) for r in page]),
         "nextToken": next_token,
         "totalCount": total_count,
         "filteredCount": filtered_count,

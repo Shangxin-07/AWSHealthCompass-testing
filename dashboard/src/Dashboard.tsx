@@ -12,6 +12,7 @@ import Tabs from '@cloudscape-design/components/tabs';
 import Badge from '@cloudscape-design/components/badge';
 import Button from '@cloudscape-design/components/button';
 import SystemStatus from './SystemStatus';
+import { accountLabel, TicketLink, ticketsSummary } from './uiHelpers';
 import ProgressBar from '@cloudscape-design/components/progress-bar';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import Alert from '@cloudscape-design/components/alert';
@@ -88,11 +89,11 @@ export default function Dashboard({ campaigns, config, onRefresh, notify, onNavi
         return (
           <Table items={resources} columnDefinitions={[
             { id: 'arn', header: 'Resource ARN', cell: (r: Resource) => <Box variant="code">{r.resourceArn}</Box> },
-            { id: 'account', header: 'Account', cell: (r: Resource) => r.accountId },
+            { id: 'account', header: 'Account', cell: (r: Resource) => accountLabel(r.accountId, r.accountName) },
             { id: 'health', header: 'Health Status', cell: (r: Resource) =>
               r.healthStatus === 'RESOLVED' ? <StatusIndicator type="success">Resolved</StatusIndicator>
               : <StatusIndicator type="pending">Pending</StatusIndicator> },
-            { id: 'ticket', header: labels.ticketColumn, cell: (r: Resource) => r.ticketId || r.jiraTicketKey || '—' },
+            { id: 'ticket', header: labels.ticketColumn, cell: (r: Resource) => <TicketLink id={r.ticketId || r.jiraTicketKey} url={r.ticketUrl} /> },
             { id: 'ticketStatus', header: labels.statusColumn, cell: (r: Resource) => r.ticketStatus === 'none' ? '—' : r.jiraStatusName || r.ticketStatus },
           ]} empty={<Box>No resources</Box>}
           footer={resourcesNext ? (
@@ -287,7 +288,10 @@ export default function Dashboard({ campaigns, config, onRefresh, notify, onNavi
           { id: 'title', header: 'Event', cell: c => <>{formatTitle(c)} {c.ticketedResources > 0 && <Badge color="blue">Campaign</Badge>}</>, sortingField: 'title' },
           { id: 'service', header: 'Service', cell: c => c.service, sortingField: 'service' },
           { id: 'type', header: 'Type', cell: c => c.hasResources ? 'Resource-level' : 'Account-level' },
-          { id: 'resources', header: 'Resources', cell: c => c.hasResources ? `${c.resolvedResources}/${c.totalResources}` : '—' },
+          // Resources (AWS Health) and tickets (ITSM) progress separately: a campaign can be
+          // complete in the ITSM while Health still reports its resources pending.
+          { id: 'resources', header: 'Resources resolved', cell: c => c.hasResources ? `${c.resolvedResources}/${c.totalResources}` : '—' },
+          { id: 'tickets', header: 'Tickets', cell: c => ticketsSummary(c.ticketsClosed ?? c.ticketsClosedResources, c.ticketsCreated ?? c.ticketedResources) },
           { id: 'deadline', header: 'Deadline', cell: c => formatDays(c.deadline), sortingField: 'deadline' },
           { id: 'actionability', header: 'Action', cell: c => c.actionability === 'ACTION_REQUIRED'
             ? <StatusIndicator type="warning">Required</StatusIndicator>

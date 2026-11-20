@@ -14,6 +14,7 @@ import type { Campaign, OnboardingConfig } from './types';
 import { formatTitle, formatDays, daysLeft } from './types';
 import { apiFetch } from './api';
 import { usePlatformLabels } from './PlatformContext';
+import { accountLabel, TicketLink, ticketsSummary } from './uiHelpers';
 
 interface Props { campaigns: Campaign[]; config: OnboardingConfig | null; onRefresh: () => void; notify: (t: string, m: string) => void; onSync?: () => void; onSplitPanelChange: (panel: React.ReactNode) => void; }
 
@@ -34,19 +35,20 @@ export default function Campaigns({ campaigns, config, onRefresh, notify, onSync
       onSplitPanelChange(
         <SplitPanel header={formatTitle(detail)} closeBehavior="hide">
           <SpaceBetween size="m">
-            <ColumnLayout columns={3}>
+            <ColumnLayout columns={4}>
               <div><Box variant="awsui-key-label">Service</Box>{detail.service}</div>
               <div><Box variant="awsui-key-label">Deadline</Box>{detail.deadline || 'None'}</div>
-              <div><Box variant="awsui-key-label">Completion</Box>{detail.totalResources > 0 ? `${Math.round((detail.resolvedResources / detail.totalResources) * 100)}%` : '—'}</div>
+              <div><Box variant="awsui-key-label">Resources resolved</Box>{detail.totalResources > 0 ? `${detail.resolvedResources}/${detail.totalResources} (${Math.round((detail.resolvedResources / detail.totalResources) * 100)}%)` : '—'}</div>
+              <div><Box variant="awsui-key-label">Tickets</Box>{ticketsSummary(detail.ticketsClosed ?? detail.ticketsClosedResources, detail.ticketsCreated ?? detail.ticketedResources)}</div>
             </ColumnLayout>
             {detail.resources && detail.resources.length > 0 && (
               <Table items={detail.resources} columnDefinitions={[
                 { id: 'arn', header: 'Resource', cell: (r: any) => r.resourceArn },
-                { id: 'account', header: 'Account', cell: (r: any) => r.accountId },
+                { id: 'account', header: 'Account', cell: (r: any) => accountLabel(r.accountId, r.accountName) },
                 { id: 'health', header: 'Health', cell: (r: any) =>
                   r.healthStatus === 'RESOLVED' ? <StatusIndicator type="success">Resolved</StatusIndicator>
                   : <StatusIndicator type="pending">Pending</StatusIndicator> },
-                { id: 'ticket', header: labels.ticketColumn, cell: (r: any) => r.ticketId || r.jiraTicketKey || '—' },
+                { id: 'ticket', header: labels.ticketColumn, cell: (r: any) => <TicketLink id={r.ticketId || r.jiraTicketKey} url={r.ticketUrl} /> },
                 { id: 'status', header: labels.statusColumn, cell: (r: any) => r.jiraStatusName || r.ticketStatus || '—' },
               ]} />
             )}
@@ -83,7 +85,7 @@ export default function Campaigns({ campaigns, config, onRefresh, notify, onSync
 
       <ColumnLayout columns={4} variant="text-grid">
         <Container><Box variant="awsui-key-label">Active Campaigns</Box><Box variant="awsui-value-large">{campaigns.length}</Box></Container>
-        <Container><Box variant="awsui-key-label">Ticketed Resources</Box><Box variant="awsui-value-large">{totalTicketed}</Box></Container>
+        <Container><Box variant="awsui-key-label">Tickets</Box><Box variant="awsui-value-large">{totalTicketed}</Box></Container>
         <Container><Box variant="awsui-key-label">Tickets Closed</Box><Box variant="awsui-value-large">{totalClosed}</Box></Container>
         <Container><Box variant="awsui-key-label">At Risk (&lt;30d)</Box><Box variant="awsui-value-large">{atRisk}</Box></Container>
       </ColumnLayout>
@@ -105,13 +107,12 @@ export default function Campaigns({ campaigns, config, onRefresh, notify, onSync
           columnDefinitions={[
             { id: 'title', header: 'Campaign', cell: c => formatTitle(c), sortingField: 'title' },
             { id: 'service', header: 'Service', cell: c => c.service },
-            { id: 'progress', header: 'Progress', cell: c => c.hasResources
+            { id: 'progress', header: 'Resources resolved', cell: c => c.hasResources
               ? <ProgressBar value={c.totalResources > 0 ? (c.resolvedResources / c.totalResources) * 100 : 0}
                   additionalInfo={`${c.resolvedResources}/${c.totalResources}`} />
               : <StatusIndicator type={c.ticketedResources > 0 ? 'success' : 'pending'}>{c.ticketedResources > 0 ? 'Ticketed' : 'Pending'}</StatusIndicator>
             },
-            { id: 'ticketed', header: 'Ticketed', cell: c => c.ticketedResources },
-            { id: 'closed', header: 'Closed', cell: c => c.ticketsClosedResources || 0 },
+            { id: 'tickets', header: 'Tickets', cell: c => ticketsSummary(c.ticketsClosed ?? c.ticketsClosedResources, c.ticketsCreated ?? c.ticketedResources) },
             { id: 'deadline', header: 'Deadline', cell: c => formatDays(c.deadline), sortingField: 'deadline' },
           ]}
           empty={<Box textAlign="center"><b>No campaigns</b><Box>Create tickets from the Health Events dashboard</Box></Box>}
