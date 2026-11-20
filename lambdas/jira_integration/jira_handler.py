@@ -177,6 +177,7 @@ def _handle_ticket_not_found(
                     ":ts": "unknown", ":ur": "jira_404",
                     ":ua": now, ":now": now,
                 },
+                ConditionExpression="attribute_exists(campaignId)",
             )
         except ClientError:
             logger.warning(

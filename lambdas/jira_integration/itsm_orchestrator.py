@@ -167,10 +167,18 @@ def _write_ticket_to_resources(
                     ":ts": "Created", ":tua": now,
                     ":tp": "jira",
                 },
+                # Only rows the Processor wrote; never create a bare row.
+                ConditionExpression="attribute_exists(campaignId)",
             )
         except ClientError as exc:
             error_code = exc.response.get("Error", {}).get("Code", "")
-            if error_code == "ValidationException":
+            if error_code == "ConditionalCheckFailedException":
+                logger.warning(
+                    "Resource row missing — ticket not recorded on it — "
+                    "campaign_id=%s tracking_key=%s",
+                    campaign_id[:_MAX_LOG_LEN], tracking_key[:_MAX_LOG_LEN],
+                )
+            elif error_code == "ValidationException":
                 # Fallback: tickets map doesn't exist (legacy item)
                 try:
                     resources_table.update_item(
@@ -190,6 +198,7 @@ def _write_ticket_to_resources(
                             ":ts": "Created", ":tua": now,
                             ":tp": "jira",
                         },
+                        ConditionExpression="attribute_exists(campaignId)",
                     )
                 except ClientError:
                     logger.warning(
@@ -538,6 +547,7 @@ def _write_back_resource_statuses(resources_table, campaign_id: str, incoming: L
                 ExpressionAttributeValues={
                     ":hs": health_status, ":lu": str(last_updated), ":now": now,
                 },
+                ConditionExpression="attribute_exists(campaignId)",
             )
         except ClientError:
             logger.warning(
