@@ -572,6 +572,7 @@ def build_update_summary(
     event: dict,
     pending_count: int,
     resolved_count: int,
+    account_display: Optional[str] = None,
 ) -> str:
     """Build an updated JIRA summary line for a RESOURCE_UPDATE.
 
@@ -594,7 +595,8 @@ def build_update_summary(
 
     service = _sanitize_summary_component(str(event.get("service", "Unknown")))
     event_type = _sanitize_summary_component(str(event.get("eventTypeCode", "")))
-    account = _sanitize_summary_component(str(event.get("affectedAccount", "")))
+    account = _sanitize_summary_component(
+        str(account_display if account_display else event.get("affectedAccount", "")))
 
     summary = (
         f"{TICKET_SUMMARY_PREFIX} {service} {event_type} — "

@@ -921,7 +921,7 @@ def lambda_handler(event: Any, context: Any) -> dict:
 
 
 def _recount_open_campaigns(context: Any, now: str) -> int:
-    """Recount stats for ACTIVE/PARTIAL campaigns, within the time budget."""
+    """Recount stats and re-check completion for ACTIVE/PARTIAL campaigns, within the time budget."""
     if _stats_table is None:
         return 0
     getter = getattr(context, "get_remaining_time_in_millis", None)
@@ -943,6 +943,11 @@ def _recount_open_campaigns(context: Any, now: str) -> int:
                 campaign_stats.recount_campaign(
                     _resources_table, _stats_table, _campaigns_table,
                     item["campaignId"], now)
+                # Re-check ticket-based completion too: a later Health update
+                # marks a campaign ACTIVE again even when every ticket is
+                # already closed, and otherwise only ticket transitions
+                # trigger this check.
+                _aggregate_campaign(item["campaignId"], now)
                 done += 1
             if "LastEvaluatedKey" not in resp:
                 break

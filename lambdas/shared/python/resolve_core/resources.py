@@ -83,6 +83,9 @@ class WriteResult(NamedTuple):
     skipped: int
     failed: int
     counts: dict
+    # entityValues of existing rows this call moved to RESOLVED (for ticket
+    # burndown; a resource already resolved when first seen isn't included).
+    newly_resolved: tuple = ()
 
 
 # --- Public API ---
@@ -139,6 +142,7 @@ def write_resources(
     skipped = 0
     failed = 0
     deltas = campaign_stats.Deltas()
+    newly_resolved: List[str] = []
 
     if campaign_type == "account-level" and not entities:
         outcome = _write_account_record(
@@ -176,6 +180,9 @@ def write_resources(
                         item["accountId"], (old or {}).get("healthStatus"),
                         item["healthStatus"], (old or {}).get("ticketStatus") or "none",
                     )
+                    if (item["healthStatus"] == "RESOLVED"
+                            and (old or {}).get("healthStatus") != "RESOLVED"):
+                        newly_resolved.append(item["entityValue"])
                 elif result == "failed":
                     failed += 1
                 else:
@@ -202,7 +209,7 @@ def write_resources(
 
     return WriteResult(
         written=written, updated=updated, skipped=skipped,
-        failed=failed, counts=counts,
+        failed=failed, counts=counts, newly_resolved=tuple(newly_resolved),
     )
 
 

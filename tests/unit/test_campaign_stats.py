@@ -292,3 +292,20 @@ def test_sync_recounts_open_campaigns_only(ddb):
         def get_remaining_time_in_millis(self):
             return 1_000
     assert sync._recount_open_campaigns(LowTime(), NOW) == 0
+
+
+def test_sync_recount_returns_reopened_campaign_to_completed(ddb):
+    """A Health update reopens a campaign (ACTIVE); if all tickets are closed, Sync completes it again."""
+    res, camps, stats = ddb
+    _campaign(camps, "REOPENED")
+    for i in range(3):
+        res.put_item(Item={"campaignId": "REOPENED", "trackingKey": f"r{i}", "accountId": "111111111111",
+                           "healthStatus": "RESOLVED", "ticketStatus": "Closed", "ticketId": "KAN-1"})
+    os.environ["STATS_TABLE"] = "compass-campaign-stats"
+    spec = importlib.util.spec_from_file_location("sync_t2", os.path.join(ROOT, "lambdas/sync/handler.py"))
+    sync = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sync)
+    sync._recount_open_campaigns(None, NOW)
+    item = camps.get_item(Key={"campaignId": "REOPENED"})["Item"]
+    assert item["status"] == "COMPLETED"
+    assert int(item["ticketsCreated"]) == 1 and int(item["ticketsClosed"]) == 1

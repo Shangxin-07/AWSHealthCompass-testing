@@ -357,6 +357,7 @@ def _build_standardized_event(
     dispatch: dict,
     envelope: dict,
     now: str,
+    newly_resolved: tuple = (),
 ) -> dict:
     """Build the v2.0 standardized event for SNS publish."""
     resources = []
@@ -401,6 +402,9 @@ def _build_standardized_event(
         "accountTags": account_tags,
         "routing": routing,
         "dispatch": dispatch,
+        # Resources this event moved to RESOLVED (capped); lets the ITSM
+        # integrations post burndown updates without re-deriving it.
+        "newlyResolved": list(newly_resolved)[:500],
         "metadata": {
             "originalEventId": envelope.get("id", ""),
             "originalEventTime": envelope.get("time", ""),
@@ -670,7 +674,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
         event_region = detail.get("region", "")
         is_new = campaign_result.action == "CREATED"
 
-        write_resources(
+        write_result = write_resources(
             resources_table=_resources_table,
             campaigns_table=_campaigns_table,
             campaign_id=campaign_id,
@@ -771,6 +775,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
             dispatch=dispatch_result,
             envelope=envelope,
             now=now,
+            newly_resolved=getattr(write_result, "newly_resolved", ()),
         )
 
         # --- (m) PUBLISH TO SNS ---
