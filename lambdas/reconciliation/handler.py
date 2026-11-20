@@ -73,6 +73,7 @@ logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
 _CAMPAIGNS_TABLE = os.environ.get("CAMPAIGNS_TABLE", "compass-campaigns")
 _RESOURCES_TABLE = os.environ.get("RESOURCES_TABLE", "compass-resources")
+_STATS_TABLE = os.environ.get("STATS_TABLE", "")
 _CONFIG_TABLE = os.environ.get("CONFIG_TABLE", "compass-config")
 _INTEGRATION_TOPIC_ARN = os.environ.get("INTEGRATION_TOPIC_ARN", "")
 _PAYLOAD_BUCKET = os.environ.get("PAYLOAD_BUCKET", "")
@@ -121,6 +122,7 @@ _BLOCKED_CONFIG_PREFIXES = ("JIRA_", "SNOW_", "TELEMETRY")
 _dynamodb = boto3.resource("dynamodb", region_name=_AWS_REGION)
 _campaigns_table = _dynamodb.Table(_CAMPAIGNS_TABLE)
 _resources_table = _dynamodb.Table(_RESOURCES_TABLE)
+_stats_table = _dynamodb.Table(_STATS_TABLE) if _STATS_TABLE else None
 _config_table = _dynamodb.Table(_CONFIG_TABLE)
 _sns_client = boto3.client("sns", region_name=_AWS_REGION)
 _s3_client = boto3.client("s3", region_name=_AWS_REGION)
@@ -941,6 +943,7 @@ def _process_single_event(
         event_region=event_region,
         is_new_campaign=is_new,
         now=now,
+        stats_table=_stats_table,
     )
 
     # SNS publish only for NEW campaigns that pass dispatch + routing

@@ -21,6 +21,8 @@ from typing import Any, List, NamedTuple, Optional
 
 from botocore.exceptions import ClientError
 
+from resolve_core import campaign_stats
+
 from resolve_core.event_parser import extract_resource_tags, parse_health_date
 from resolve_core.tags import normalize_tags
 
@@ -104,8 +106,14 @@ def write_resources(
     event_region: str,
     is_new_campaign: bool,
     now: str,
+    stats_table: Any = None,
 ) -> WriteResult:
     """Write resource records and update campaign counters.
+
+    With ``stats_table`` (compass-campaign-stats), counters are maintained
+    incrementally: per-account ADDs for the rows this call created or whose
+    health changed, then campaign totals summed from the stats partition.
+    Without it, falls back to the legacy full recount of the campaign.
 
     For new campaigns, uses ``BatchWriteItem`` for speed. For
     re-ingestion, uses conditional ``PutItem`` + ``UpdateItem``
@@ -130,14 +138,17 @@ def write_resources(
     updated = 0
     skipped = 0
     failed = 0
+    deltas = campaign_stats.Deltas()
 
     if campaign_type == "account-level" and not entities:
-        ok = _write_account_record(
+        outcome = _write_account_record(
             resources_table, campaign_id, affected_account,
             account_tags, now,
         )
-        written = 1 if ok else 0
-        failed = 0 if ok else 1
+        written = 1 if outcome in ("created", "exists") else 0
+        failed = 0 if written else 1
+        if outcome == "created":
+            deltas.new_row(affected_account, None)
     else:
         items = _build_resource_items(
             campaign_id, entities, account_tags, event_region, now,
@@ -150,21 +161,35 @@ def write_resources(
         elif is_new_campaign:
             w, f = _batch_write(resources_table, items)
             written, failed = w, f
+            if not f:
+                for item in items:
+                    deltas.new_row(item["accountId"], item["healthStatus"])
         else:
             for item in items:
-                result = _upsert_resource(resources_table, item)
+                result, old = _upsert_resource(resources_table, item)
                 if result == "created":
                     written += 1
+                    deltas.new_row(item["accountId"], item["healthStatus"])
                 elif result == "updated":
                     updated += 1
+                    deltas.changed_row(
+                        item["accountId"], (old or {}).get("healthStatus"),
+                        item["healthStatus"], (old or {}).get("ticketStatus") or "none",
+                    )
                 elif result == "failed":
                     failed += 1
                 else:
                     skipped += 1
 
-    counts = _compute_and_update_counts(
-        resources_table, campaigns_table, campaign_id, now,
-    )
+    if stats_table is None:
+        counts = _compute_and_update_counts(
+            resources_table, campaigns_table, campaign_id, now,
+        )
+    else:
+        counts = _update_counts_incremental(
+            resources_table, campaigns_table, stats_table, campaign_id,
+            deltas, exact=(failed == 0), now=now,
+        )
 
     logger.info(
         "Resource write complete — campaign_id=%s written=%d updated=%d "
@@ -520,10 +545,12 @@ def _batch_write(table: Any, items: List[dict]) -> tuple[int, int]:
     return written, failed
 
 
-def _upsert_resource(table: Any, item: dict) -> str:
+def _upsert_resource(table: Any, item: dict) -> tuple:
     """Conditional PutItem with UpdateItem fallback.
 
-    Returns: "created", "updated", "skipped", or "failed".
+    Returns ``(outcome, old_item)``: outcome is "created", "updated",
+    "skipped" or "failed"; ``old_item`` holds the row's previous
+    attributes for "updated" (for counter deltas), else ``None``.
     """
     campaign_id = item["campaignId"]
     tracking_key = item["trackingKey"]
@@ -537,7 +564,7 @@ def _upsert_resource(table: Any, item: dict) -> str:
                 "attribute_not_exists(trackingKey)"
             ),
         )
-        return "created"
+        return "created", None
     except ClientError as exc:
         if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
             logger.error(
@@ -549,13 +576,14 @@ def _upsert_resource(table: Any, item: dict) -> str:
                 _sanitize_log(tracking_key),
                 type(exc).__name__,
             )
-            return "failed"
+            return "failed", None
 
     # Phase 2: Resource exists — update health status only
     try:
-        table.update_item(
+        resp = table.update_item(
             Key={"campaignId": campaign_id, "trackingKey": tracking_key},
             UpdateExpression=_UPSERT_UPDATE_EXPR,
+            ReturnValues="ALL_OLD",
             ExpressionAttributeNames=_UPSERT_ATTR_NAMES,
             ExpressionAttributeValues={
                 ":hs": item["healthStatus"],
@@ -563,7 +591,7 @@ def _upsert_resource(table: Any, item: dict) -> str:
                 ":ua": item["updatedAt"],
             },
         )
-        return "updated"
+        return "updated", resp.get("Attributes")
     except ClientError as exc:
         logger.error(
             "Resource UpdateItem failed — "
@@ -574,7 +602,7 @@ def _upsert_resource(table: Any, item: dict) -> str:
             _sanitize_log(tracking_key),
             type(exc).__name__,
         )
-        return "failed"
+        return "failed", None
 
 
 def _write_account_record(
@@ -583,8 +611,8 @@ def _write_account_record(
     affected_account: str,
     account_tags: dict,
     now: str,
-) -> bool:
-    """Write a single ACCOUNT# tracking record for account-level campaigns."""
+) -> str:
+    """Write a single ACCOUNT# tracking record. Returns "created", "exists" or "failed"."""
     valid_account = _validate_account_id(affected_account)
     if valid_account is None:
         logger.warning(
@@ -593,7 +621,7 @@ def _write_account_record(
             "campaign_id=%s containsPII=false",
             _sanitize_log(campaign_id),
         )
-        return False
+        return "failed"
 
     tracking_key = f"ACCOUNT#{valid_account}"
     safe_tags = _check_tag_payload_size(normalize_tags(account_tags))
@@ -629,10 +657,10 @@ def _write_account_record(
                 "attribute_not_exists(trackingKey)"
             ),
         )
-        return True
+        return "created"
     except ClientError as exc:
         if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            return True  # Already exists — idempotent success
+            return "exists"  # Already exists — idempotent success
         logger.error(
             "Account record write failed — "
             "error_code=PROC_RESOURCE_WRITE_FAILED "
@@ -642,7 +670,45 @@ def _write_account_record(
             _sanitize_log(tracking_key),
             type(exc).__name__,
         )
-        return False
+        return "failed"
+
+
+def _update_counts_incremental(
+    resources_table: Any,
+    campaigns_table: Any,
+    stats_table: Any,
+    campaign_id: str,
+    deltas: "campaign_stats.Deltas",
+    exact: bool,
+    now: str,
+) -> dict:
+    """Apply counter deltas, or recount when deltas can't be trusted.
+
+    Recounts (once) for campaigns created before per-account stats existed,
+    and whenever a write failed (the deltas would no longer match the rows).
+    """
+    try:
+        camp = campaigns_table.get_item(
+            Key={"campaignId": campaign_id}, ProjectionExpression="statsVersion",
+        ).get("Item") or {}
+        if exact and camp.get("statsVersion"):
+            tot = campaign_stats.apply_deltas(
+                stats_table, campaigns_table, campaign_id, deltas, now)
+        else:
+            tot = campaign_stats.recount_campaign(
+                resources_table, stats_table, campaigns_table, campaign_id, now)
+    except ClientError as exc:
+        logger.error(
+            "Campaign stats update failed — error_code=PROC_STATS_UPDATE_FAILED "
+            "campaign_id=%s exception_type=%s containsPII=false",
+            _sanitize_log(campaign_id), type(exc).__name__,
+        )
+        return {}
+    return {
+        "totalResourceCount": tot["total"],
+        "pendingCount": tot["pending"],
+        "resolvedCount": tot["resolved"],
+    }
 
 
 def _compute_and_update_counts(

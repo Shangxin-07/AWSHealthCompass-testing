@@ -17,6 +17,7 @@ from typing import Any, List, NamedTuple, Optional
 
 from botocore.exceptions import ClientError
 
+from resolve_core.campaign_stats import STATS_VERSION
 from resolve_core.event_parser import (
     coerce_page_fields,
     extract_account_tags,
@@ -524,6 +525,8 @@ def _build_new_item(
         "resolvedCount": counts.resolved,
         "pagesReceived": 1,
         "totalPages": page_info.total_pages,
+        # Counters maintained incrementally in compass-campaign-stats.
+        "statsVersion": STATS_VERSION,
         "createdAt": now,
         "updatedAt": now,
     }

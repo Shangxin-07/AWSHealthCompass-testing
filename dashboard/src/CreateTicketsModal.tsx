@@ -73,9 +73,12 @@ export default function CreateTicketsModal({ campaign, onDismiss, onCreated, not
     ? campaign.totalResources - (campaign.ticketedResources || 0) - (campaign.resolvedResources || 0)
     : 1;
 
-  const accounts = campaign.resources
-    ? new Set(campaign.resources.filter(r => !(r.ticketId || r.jiraTicketKey) && r.healthStatus !== 'RESOLVED').map(r => r.accountId)).size
-    : 1;
+  // Prefer the server's count (all resources); the embedded list is only the first page.
+  const accounts = typeof campaign.ticketableAccounts === 'number'
+    ? campaign.ticketableAccounts
+    : campaign.resources
+      ? new Set(campaign.resources.filter(r => !(r.ticketId || r.jiraTicketKey) && r.healthStatus !== 'RESOLVED').map(r => r.accountId)).size
+      : 1;
 
   return (
     <Modal visible onDismiss={onDismiss} header={`Create Tickets — ${formatTitle(campaign)}`}

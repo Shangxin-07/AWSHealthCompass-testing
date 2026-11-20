@@ -7,6 +7,10 @@ export interface Campaign {
   resolvedResources: number; ticketsClosedResources?: number;
   affectedAccount?: string; resources?: Resource[];
   groupBreakdown?: Record<string, GroupData>;
+  /** Detail view embeds only the first page of resources; true when more exist. */
+  resourcesTruncated?: boolean;
+  /** Accounts with unticketed, unresolved resources (from per-account stats). */
+  ticketableAccounts?: number;
 }
 
 export interface Resource {

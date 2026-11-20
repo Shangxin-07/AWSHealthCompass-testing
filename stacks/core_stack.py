@@ -116,6 +116,19 @@ class CoreStack(cdk.Stack):
             projection_type=dynamodb.ProjectionType.KEYS_ONLY,
         )
 
+        # Per-campaign, per-account resource counters (resolve_core.campaign_stats).
+        # Small items; replaces re-reading every resource row per event/request.
+        self.stats_table = dynamodb.Table(
+            self, "CampaignStatsTable",
+            table_name="compass-campaign-stats",
+            partition_key=dynamodb.Attribute(name="campaignId", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(name="accountId", type=dynamodb.AttributeType.STRING),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            point_in_time_recovery=True,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            removal_policy=data_removal,
+        )
+
         # ---------------------------------------------------------------
         # SQS Ingestion Queue + DLQ
         # SQS_MANAGED encryption required.
@@ -320,6 +333,7 @@ class CoreStack(cdk.Stack):
             environment={
                 "CAMPAIGNS_TABLE": self.campaigns_table.table_name,
                 "RESOURCES_TABLE": self.resources_table.table_name,
+                "STATS_TABLE": self.stats_table.table_name,
                 "CONFIG_TABLE": self.config_table.table_name,
                 "INTEGRATION_TOPIC_ARN": self.integration_topic.topic_arn,
                 "PAYLOAD_BUCKET": self.payload_bucket.bucket_name,
@@ -342,6 +356,7 @@ class CoreStack(cdk.Stack):
         # ---------------------------------------------------------------
         self.campaigns_table.grant_read_write_data(self.processor_fn)
         self.resources_table.grant_read_write_data(self.processor_fn)
+        self.stats_table.grant_read_write_data(self.processor_fn)
         self.config_table.grant_read_data(self.processor_fn)
         self.integration_topic.grant_publish(self.processor_fn)
         self.sns_key.grant_encrypt_decrypt(self.processor_fn)

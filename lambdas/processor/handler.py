@@ -55,6 +55,7 @@ logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
 _CAMPAIGNS_TABLE = os.environ.get("CAMPAIGNS_TABLE", "compass-campaigns")
 _RESOURCES_TABLE = os.environ.get("RESOURCES_TABLE", "compass-resources")
+_STATS_TABLE = os.environ.get("STATS_TABLE", "")
 _CONFIG_TABLE = os.environ.get("CONFIG_TABLE", "compass-config")
 _INTEGRATION_TOPIC_ARN = os.environ.get("INTEGRATION_TOPIC_ARN", "")
 _PAYLOAD_BUCKET = os.environ.get("PAYLOAD_BUCKET", "")
@@ -99,6 +100,7 @@ _s3_client = boto3.client("s3", region_name=_AWS_REGION)
 
 _campaigns_table = _dynamodb.Table(_CAMPAIGNS_TABLE)
 _resources_table = _dynamodb.Table(_RESOURCES_TABLE)
+_stats_table = _dynamodb.Table(_STATS_TABLE) if _STATS_TABLE else None
 _config_table = _dynamodb.Table(_CONFIG_TABLE)
 
 
@@ -679,6 +681,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
             event_region=event_region,
             is_new_campaign=is_new,
             now=now,
+            stats_table=_stats_table,
         )
 
         # --- PAGE > 1: append only, skip dispatch/routing/publish ---
