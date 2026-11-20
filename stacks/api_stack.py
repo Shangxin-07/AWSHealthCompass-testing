@@ -97,9 +97,12 @@ class ApiStack(cdk.Stack):
 
         # IAM — least privilege
         campaigns_table.grant(self.sync_fn, "dynamodb:GetItem", "dynamodb:UpdateItem")
+        # BatchGetItem: the ticket index is built from ticketStatus-index keys
+        # + BatchGetItem (lambdas/sync/handler.py::_batch_get_items).
         resources_table.grant(
             self.sync_fn,
             "dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:Query", "dynamodb:Scan",
+            "dynamodb:BatchGetItem",
         )
         config_table.grant(self.sync_fn, "dynamodb:GetItem", "dynamodb:PutItem")
         jira_secret.grant_read(self.sync_fn)

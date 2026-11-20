@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import time
+from decimal import Decimal
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -276,8 +277,11 @@ _INDEX_PROJECTION = (
 )
 
 
-def _index_item(index: Dict[str, Dict[str, str]], item: Dict[str, Any]) -> None:
+def _index_item(index: Dict[str, List[Dict[str, str]]], item: Dict[str, Any]) -> None:
     """Add one ResourcesTable item's ticket(s) to the in-memory index.
+
+    One ticket usually covers several resource rows (all of an account's
+    resources in a campaign), so each ticketId maps to a list of rows.
 
     Reads from `tickets` map (dual-platform) with flat-field fallback
     for backward compatibility with legacy items.
@@ -292,23 +296,23 @@ def _index_item(index: Dict[str, Dict[str, str]], item: Dict[str, Any]) -> None:
                 continue
             ticket_id = ticket_data.get("ticketId")
             if ticket_id and isinstance(ticket_id, str):
-                index[ticket_id] = {
+                index.setdefault(ticket_id, []).append({
                     "campaignId": campaign_id,
                     "trackingKey": tracking_key,
                     "platform": platform,
                     "ticketStatus": ticket_data.get("ticketStatus"),
                     "ticketRawStatus": ticket_data.get("ticketRawStatus"),
-                }
+                })
     else:
         ticket_id = item.get("ticketId")
         if ticket_id and isinstance(ticket_id, str):
-            index[ticket_id] = {
+            index.setdefault(ticket_id, []).append({
                 "campaignId": campaign_id,
                 "trackingKey": tracking_key,
                 "platform": item.get("ticketPlatform", "jira"),
                 "ticketStatus": item.get("ticketStatus"),
                 "ticketRawStatus": item.get("ticketRawStatus"),
-            }
+            })
 
 
 def _list_ticketed_keys() -> List[Dict[str, str]]:
@@ -367,16 +371,16 @@ def _batch_get_items(keys: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     return items
 
 
-def _build_ticket_index() -> Dict[str, Dict[str, str]]:
+def _build_ticket_index() -> Dict[str, List[Dict[str, str]]]:
     """Build ticketId -> metadata index from ResourcesTable.
 
     Uses the ticketStatus-index GSI to locate ticketed items, then
     BatchGetItem for their full attributes, instead of scanning the entire
     table (which grows with every resource across every account).
 
-    Returns dict: ticketId -> {campaignId, trackingKey, platform, ticketStatus, ticketRawStatus}.
+    Returns dict: ticketId -> [{campaignId, trackingKey, platform, ticketStatus, ticketRawStatus}, ...].
     """
-    index: Dict[str, Dict[str, str]] = {}
+    index: Dict[str, List[Dict[str, str]]] = {}
     for item in _batch_get_items(_list_ticketed_keys()):
         _index_item(index, item)
     return index
@@ -437,7 +441,7 @@ def _poll_jira(client: JiraClient, jql: str) -> List[dict]:
 
 def _process_ticket(
     issue: dict,
-    ticket_index: Dict[str, Dict[str, str]],
+    ticket_index: Dict[str, List[Dict[str, str]]],
     now: str,
 ) -> Optional[str]:
     """Process a single JIRA issue. Returns affected campaignId or None.: Validates all JIRA-sourced fields before DynamoDB write.
@@ -451,9 +455,9 @@ def _process_ticket(
         )
         return None
 
-    # Look up in index
-    entry = ticket_index.get(key)
-    if not entry:
+    # Look up in index (all resource rows covered by this ticket)
+    entries = ticket_index.get(key)
+    if not entries:
         # Ticket not tracked in ResourcesTable — skip silently
         return None
 
@@ -467,10 +471,21 @@ def _process_ticket(
     )
     updated_at = _validate_jira_timestamp(fields.get("updated"), now)
 
-    # Skip write if status unchanged
-    if entry.get("ticketStatus") == normalized and entry.get("ticketRawStatus") == raw_status:
-        return None
+    affected: Optional[str] = None
+    for entry in entries:
+        # Skip rows whose status is unchanged
+        if entry.get("ticketStatus") == normalized and entry.get("ticketRawStatus") == raw_status:
+            continue
+        if _update_ticket_row(entry, key, normalized, raw_status, updated_at, now):
+            affected = entry["campaignId"]
+    return affected
 
+
+def _update_ticket_row(
+    entry: Dict[str, str], key: str, normalized: str, raw_status: str,
+    updated_at: str, now: str,
+) -> bool:
+    """Write a ticket status onto one ResourcesTable row. Returns True on success."""
     # Update ResourcesTable — write to both nested tickets map and flat fields
     campaign_id = entry["campaignId"]
     tracking_key = entry["trackingKey"]
@@ -501,7 +516,7 @@ def _process_ticket(
             },
             ConditionExpression="attribute_exists(campaignId)",
         )
-        return campaign_id
+        return True
     except ClientError as exc:
         error_code = exc.response.get("Error", {}).get("Code", "")
         if error_code == "ValidationException":
@@ -527,7 +542,7 @@ def _process_ticket(
                     },
                     ConditionExpression="attribute_exists(campaignId)",
                 )
-                return campaign_id
+                return True
             except ClientError:
                 logger.error(
                     "Resource ticket status update failed (fallback) — "
@@ -535,7 +550,7 @@ def _process_ticket(
                     "ticket=%s campaign=%s",
                     key, _sanitize_log(campaign_id),
                 )
-                return None
+                return False
         elif error_code == "ConditionalCheckFailedException":
             logger.warning(
                 "Resource not found for ticket update — ticket=%s campaign=%s",
@@ -548,7 +563,33 @@ def _process_ticket(
                 "ticket=%s campaign=%s exception_type=%s",
                 key, _sanitize_log(campaign_id), type(exc).__name__,
             )
-        return None
+        return False
+
+
+def _snow_update_row(campaign_id: str, tracking_key: str, normalized: str,
+                     raw_status: str, last_updated: str, now: str) -> bool:
+    """Write a ServiceNow ticket status onto one ResourcesTable row."""
+    try:
+        _resources_table.update_item(
+            Key={"campaignId": campaign_id, "trackingKey": tracking_key},
+            UpdateExpression="SET #ts = :ts, #trs = :trs, #tua = :tua, #ua = :ua",
+            ExpressionAttributeNames={
+                "#ts": "ticketStatus",
+                "#trs": "ticketRawStatus",
+                "#tua": "ticketUpdatedAt",
+                "#ua": "updatedAt",
+            },
+            ExpressionAttributeValues={
+                ":ts": normalized,
+                ":trs": raw_status,
+                ":tua": last_updated,
+                ":ua": now,
+            },
+            ConditionExpression="attribute_exists(campaignId)",
+        )
+        return True
+    except ClientError:
+        return False
 
 
 # ===================================================================
@@ -572,19 +613,25 @@ def _aggregate_campaign(campaign_id: str, now: str) -> None:
         "ProjectionExpression": "ticketId, ticketStatus",
     }
 
+    # Count distinct tickets (a ticket covers several resource rows). A
+    # ticket is Closed only when all its rows are, In Progress if any is.
+    ticket_rows: Dict[str, set] = {}
     while True:
         resp = _resources_table.query(**query_kwargs)
         for item in resp.get("Items", []):
-            if item.get("ticketId"):
-                tickets_created += 1
-                status = item.get("ticketStatus")
-                if status == "Closed":
-                    tickets_closed += 1
-                elif status == "In Progress":
-                    tickets_in_progress += 1
+            ticket_id = item.get("ticketId")
+            if ticket_id:
+                ticket_rows.setdefault(ticket_id, set()).add(item.get("ticketStatus"))
         if "LastEvaluatedKey" not in resp:
             break
         query_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+
+    for statuses in ticket_rows.values():
+        tickets_created += 1
+        if statuses == {"Closed"}:
+            tickets_closed += 1
+        elif "In Progress" in statuses or "Closed" in statuses:
+            tickets_in_progress += 1
 
     # Calculate completion percentage
     if tickets_created > 0:
@@ -615,7 +662,7 @@ def _aggregate_campaign(campaign_id: str, now: str) -> None:
                 ":tc": tickets_created,
                 ":tip": tickets_in_progress,
                 ":tcc": tickets_closed,
-                ":cp": completion_pct,
+                ":cp": Decimal(str(completion_pct)),  # boto3 rejects float
                 ":ua": now,
             },
             ConditionExpression="attribute_exists(campaignId)",
@@ -801,42 +848,20 @@ def _sync_servicenow(now: str, start_time: float) -> dict:
 
     for ticket_status in statuses:
         ticket_id = ticket_status.ticket_id
-        entry = ticket_index.get(ticket_id)
-        if not entry:
-            continue
-
         normalized = ticket_status.normalized_status
         raw_status = ticket_status.raw_status
 
-        # Skip if unchanged
-        if entry.get("ticketStatus") == normalized and entry.get("ticketRawStatus") == raw_status:
-            continue
-
-        campaign_id = entry["campaignId"]
-        tracking_key = entry["trackingKey"]
-
-        try:
-            _resources_table.update_item(
-                Key={"campaignId": campaign_id, "trackingKey": tracking_key},
-                UpdateExpression="SET #ts = :ts, #trs = :trs, #tua = :tua, #ua = :ua",
-                ExpressionAttributeNames={
-                    "#ts": "ticketStatus",
-                    "#trs": "ticketRawStatus",
-                    "#tua": "ticketUpdatedAt",
-                    "#ua": "updatedAt",
-                },
-                ExpressionAttributeValues={
-                    ":ts": normalized,
-                    ":trs": raw_status,
-                    ":tua": ticket_status.last_updated,
-                    ":ua": now,
-                },
-                ConditionExpression="attribute_exists(campaignId)",
-            )
-            affected_campaigns.add(campaign_id)
-            transitions += 1
-        except ClientError:
-            errors += 1
+        for entry in ticket_index.get(ticket_id) or []:
+            # Skip rows whose status is unchanged
+            if entry.get("ticketStatus") == normalized and entry.get("ticketRawStatus") == raw_status:
+                continue
+            campaign_id = entry["campaignId"]
+            if _snow_update_row(campaign_id, entry["trackingKey"], normalized,
+                                raw_status, ticket_status.last_updated, now):
+                affected_campaigns.add(campaign_id)
+                transitions += 1
+            else:
+                errors += 1
 
     # Campaign aggregation (same as JIRA)
     for campaign_id in affected_campaigns:
