@@ -797,8 +797,12 @@ def handle(event: dict, context: Any) -> dict:
             message_id, event_arn, receive_count,
         )
 
-        # Dispatch by action
-        action = str(metadata.get("action", "CREATE"))
+        # Dispatch by action. The Processor and Reconciliation publish it as
+        # event.action; metadata.action is kept as a fallback for older
+        # messages. (Reading only metadata.action made every message a CREATE,
+        # so RESOURCE_UPDATE — ticket updates when Health resolves resources —
+        # never ran.)
+        action = str(event_data.get("action") or metadata.get("action") or "CREATE")
         campaign_type = event_data.get("campaignType", "")
         resources = payload.get("resources", [])
 

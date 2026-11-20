@@ -1525,6 +1525,134 @@ def handle_generate_events(event, context):
 
 
 # ===================================================================
+# POST /api/test/resource-status — Resource Lifecycle test controls
+# ===================================================================
+
+_LIFECYCLE_STATUSES = ("PENDING", "RESOLVED")
+_LIFECYCLE_MAX_ARNS = 200
+_LIFECYCLE_MAX_CHANGED = 5000
+_LIFECYCLE_ENTITIES_PER_EVENT = 200   # roughly a real Health event page
+_LIFECYCLE_ENTITIES_PER_INVOKE = 1000
+
+
+def handle_test_resource_status(event, context):
+    """Re-report existing resources with a new health status (test tools only).
+
+    Body: {campaignId, status: PENDING|RESOLVED, accountId?, resourceArns?}
+    (at least one of accountId / resourceArns). Builds Health events with the
+    campaign's identity and the selected resources' ARNs, and sends them via
+    the test Event Generator through the normal ingestion pipeline, exactly
+    like an AWS Health update would arrive.
+    """
+    body = _parse_body(event)
+    if not isinstance(body, dict):
+        return _error(400, "INVALID_REQUEST", "Request body must be a JSON object.")
+    generator_fn = os.environ.get("EVENT_GENERATOR_FUNCTION_NAME", "")
+    if not generator_fn:
+        return _error(400, "NOT_CONFIGURED", "Test tools not deployed (deploy_test_tools=true).")
+
+    campaign_id = body.get("campaignId")
+    status = body.get("status")
+    account_id = body.get("accountId")
+    arns = body.get("resourceArns")
+    if not isinstance(campaign_id, str) or not campaign_id:
+        return _error(400, "INVALID_PARAM", "campaignId is required.")
+    if status not in _LIFECYCLE_STATUSES:
+        return _error(400, "INVALID_PARAM", "status must be PENDING or RESOLVED.")
+    if account_id is not None and not (isinstance(account_id, str) and re.match(r"^\d{12}$", account_id)):
+        return _error(400, "INVALID_PARAM", "accountId must be exactly 12 digits.")
+    if arns is not None and not (isinstance(arns, list) and 0 < len(arns) <= _LIFECYCLE_MAX_ARNS
+                                 and all(isinstance(a, str) and 0 < len(a) <= 2048 for a in arns)):
+        return _error(400, "INVALID_PARAM", f"resourceArns must be a list of 1-{_LIFECYCLE_MAX_ARNS} ARNs.")
+    if account_id is None and arns is None:
+        return _error(400, "INVALID_PARAM", "Provide accountId and/or resourceArns.")
+
+    try:
+        campaign = _dynamodb.Table(CAMPAIGNS_TABLE).get_item(Key={"campaignId": campaign_id}).get("Item")
+    except ClientError:
+        logger.exception("Failed to get campaign %s", campaign_id[:256])
+        return _error(500, "SYS_INTERNAL_ERROR", "Failed to read campaign.")
+    if not campaign:
+        return _error(404, "NOT_FOUND", "Campaign not found.")
+    if campaign.get("campaignType") != "resource-level":
+        return _error(400, "INVALID_PARAM", "Only resource-level campaigns have resources to change.")
+
+    from boto3.dynamodb.conditions import Attr, Key
+    kw = {"KeyConditionExpression": Key("campaignId").eq(campaign_id),
+          "ProjectionExpression": "entityValue, accountId, healthStatus, #r",
+          "ExpressionAttributeNames": {"#r": "region"}}
+    if account_id:
+        kw["FilterExpression"] = Attr("accountId").eq(account_id)
+    wanted = set(arns) if arns else None
+    rows = []
+    try:
+        table = _dynamodb.Table(RESOURCES_TABLE)
+        while True:
+            resp = table.query(**kw)
+            rows.extend(r for r in resp.get("Items", []) if r.get("entityValue")
+                        and (wanted is None or r["entityValue"] in wanted))
+            if "LastEvaluatedKey" not in resp:
+                break
+            kw["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    except ClientError:
+        logger.exception("Failed to query resources for %s", campaign_id[:256])
+        return _error(500, "SYS_INTERNAL_ERROR", "Failed to read resources.")
+
+    changed = [r for r in rows if (r.get("healthStatus") or "").upper() != status]
+    if len(changed) > _LIFECYCLE_MAX_CHANGED:
+        return _error(400, "TOO_MANY", f"{len(changed)} resources would change; limit is {_LIFECYCLE_MAX_CHANGED}.")
+    result = {"selected": len(rows), "changed": len(changed), "eventsSent": 0,
+              "accounts": len({r["accountId"] for r in changed})}
+    if not changed:
+        return _success(200, result)
+
+    by_acct = {}
+    for r in changed:
+        by_acct.setdefault(r["accountId"], []).append(r)
+    specs = []
+    for acct, acct_rows in sorted(by_acct.items()):
+        for i in range(0, len(acct_rows), _LIFECYCLE_ENTITIES_PER_EVENT):
+            chunk = acct_rows[i:i + _LIFECYCLE_ENTITIES_PER_EVENT]
+            specs.append({
+                "service": campaign.get("service", ""),
+                "eventTypeCode": campaign.get("eventTypeCode", ""),
+                "eventArn": campaign.get("eventArn", ""),
+                "affectedAccount": acct,
+                "region": chunk[0].get("region") or "us-east-1",
+                "entities": [{"entityValue": r["entityValue"], "status": status} for r in chunk],
+            })
+
+    # Group specs into generator invocations under its per-request limits.
+    batches, cur, n = [], [], 0
+    for spec in specs:
+        k = len(spec["entities"])
+        if cur and (n + k > _LIFECYCLE_ENTITIES_PER_INVOKE or len(cur) >= 50):
+            batches.append(cur)
+            cur, n = [], 0
+        cur.append(spec)
+        n += k
+    if cur:
+        batches.append(cur)
+
+    for batch in batches:
+        try:
+            resp = _lambda_client.invoke(
+                FunctionName=generator_fn, InvocationType="RequestResponse",
+                Payload=json.dumps({"replay": batch}).encode("utf-8"))
+            out = json.loads(resp["Payload"].read() or b"{}")
+        except (ClientError, ValueError):
+            logger.exception("Event generator replay failed")
+            return _error(502, "INVOKE_FAILED", "Event generator replay failed.")
+        if out.get("statusCode") not in (200, 207):
+            return _error(502, "INVOKE_FAILED", str(out.get("errorMessage", "replay rejected"))[:200])
+        result["eventsSent"] += int(out.get("published", 0))
+
+    logger.info("Resource lifecycle replay — campaign_id=%s status=%s changed=%d events=%d",
+                campaign_id[:256], status, len(changed), result["eventsSent"])
+    return _success(202, result)
+
+
+# ===================================================================
 # PUT /api/config/platform — Switch active ITSM platform
 # ===================================================================
 

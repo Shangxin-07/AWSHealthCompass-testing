@@ -35,6 +35,7 @@ from resolve_core.ticket_builder import (
     build_template_a,
     build_template_b,
     build_update_summary,
+    format_account_display,
 )
 
 logger = logging.getLogger("compass")
@@ -743,44 +744,56 @@ def update_tickets(
         logger.warning("RESOURCE_UPDATE skipped — resources not a list — campaign_id=%s", campaign_id[:_MAX_LOG_LEN])
         return True
 
-    pending_count = campaign.get("pendingCount", 0)
-    resolved_count = campaign.get("resolvedCount", 0)
-    total_count = campaign.get("totalResourceCount", 0)
-
+    # Only the tickets covering this event's account. Health reports updates
+    # per affected account; touching every ticket in a (merged, org-wide)
+    # campaign cost O(accounts x tickets) ITSM calls and overwrote every
+    # ticket's title with the triggering account's.
+    affected_account = str(event_data.get("affectedAccount", ""))
     resources_by_ticket = _get_resources_by_ticket(resources_table, campaign_id)
+    if affected_account:
+        resources_by_ticket = {
+            tid: rows for tid, rows in resources_by_ticket.items()
+            if any(r.get("accountId") == affected_account for r in rows)
+        }
     if not resources_by_ticket:
         logger.info("RESOURCE_UPDATE — no ticketed resources — campaign_id=%s", campaign_id[:_MAX_LOG_LEN])
         _write_back_resource_statuses(resources_table, campaign_id, resources)
         return True
 
-    all_stored = []
-    for ticket_resources in resources_by_ticket.values():
-        all_stored.extend(ticket_resources)
-    newly_resolved_arns = _detect_newly_resolved(resources, all_stored)
-
-    is_fully_resolved = (
-        isinstance(total_count, (int, float)) and int(total_count) > 0
-        and isinstance(resolved_count, (int, float)) and int(resolved_count) >= int(total_count)
-    )
-
-    updated_summary = build_update_summary(event_data, pending_count, resolved_count)
+    # Newly resolved resources: reported by the Processor, which knows each
+    # row's previous status. (Comparing the event with the table here found
+    # nothing, because the Processor has already written the new statuses.)
+    if "newlyResolved" in payload:
+        newly_resolved_set = {str(a) for a in (payload.get("newlyResolved") or [])}
+    else:
+        all_stored = [r for rows in resources_by_ticket.values() for r in rows]
+        newly_resolved_set = set(_detect_newly_resolved(resources, all_stored))
+    account_display = format_account_display(event_data, payload.get("routing") or {})
 
     had_retryable_failure = False
+    newly_resolved_total = 0
     for ticket_id, ticket_resources in resources_by_ticket.items():
         try:
-            update_issue_fn(ticket_id, {"summary": updated_summary})
+            # Counts from this ticket's own resources (already updated).
+            pending = sum(1 for r in ticket_resources if r.get("healthStatus") != "RESOLVED")
+            resolved = len(ticket_resources) - pending
+            update_issue_fn(ticket_id, {
+                "summary": build_update_summary(event_data, pending, resolved, account_display)})
 
-            if newly_resolved_arns or is_fully_resolved:
-                if _should_post_comment(campaigns_table, campaign_id, is_fully_resolved):
-                    comment_body = build_burndown_comment(
-                        campaign={"totalResourceCount": total_count},
-                        pending_count=pending_count,
-                        resolved_count=resolved_count,
-                        newly_resolved_arns=newly_resolved_arns,
-                    )
-                    if comment_body:
-                        add_comment_fn(ticket_id, comment_body)
-                        _update_last_burndown(campaigns_table, campaign_id)
+            ticket_newly = [str(r.get("entityValue") or r.get("trackingKey", ""))[:2048]
+                            for r in ticket_resources
+                            if (r.get("entityValue") or r.get("trackingKey")) in newly_resolved_set]
+            if ticket_newly:
+                newly_resolved_total += len(ticket_newly)
+                comment_body = build_burndown_comment(
+                    campaign={"totalResourceCount": len(ticket_resources)},
+                    pending_count=pending,
+                    resolved_count=resolved,
+                    newly_resolved_arns=ticket_newly,
+                )
+                if comment_body:
+                    add_comment_fn(ticket_id, comment_body)
+                    _update_last_burndown(campaigns_table, campaign_id)
 
         except ITSMAPIError as exc:
             if exc.status_code == 404 and on_not_found:
@@ -817,7 +830,7 @@ def update_tickets(
     _write_back_resource_statuses(resources_table, campaign_id, resources)
 
     logger.info(
-        "RESOURCE_UPDATE complete — campaign_id=%s tickets=%d newly_resolved=%d",
-        campaign_id[:_MAX_LOG_LEN], len(resources_by_ticket), len(newly_resolved_arns),
+        "RESOURCE_UPDATE complete — campaign_id=%s account=%s tickets=%d newly_resolved=%d",
+        campaign_id[:_MAX_LOG_LEN], affected_account, len(resources_by_ticket), newly_resolved_total,
     )
     return not had_retryable_failure
