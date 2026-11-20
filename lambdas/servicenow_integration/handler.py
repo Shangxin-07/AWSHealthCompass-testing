@@ -27,6 +27,7 @@ from resolve_core.servicenow_formatter import ServiceNowFormatter
 from resolve_core.itsm_client import ITSMAPIError
 from resolve_core.config_schema import PK_SNOW_CONNECTION
 from resolve_core.constants import TICKET_SUMMARY_PREFIX
+from resolve_core.ticket_builder import format_account_display
 
 logger = logging.getLogger("compass")
 logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
@@ -168,7 +169,8 @@ def _process_event(client: ServiceNowClient, payload: dict, snow_target: dict) -
     record_type = snow_target.get("recordType", "change_request")
 
     # Build ticket content
-    summary = f"{TICKET_SUMMARY_PREFIX} {event_data.get('service', '')} {event_data.get('eventTypeCode', '')} — {event_data.get('affectedAccount', '')}"
+    account_display = format_account_display(event_data, payload.get("routing") or {})
+    summary = f"{TICKET_SUMMARY_PREFIX} {event_data.get('service', '')} {event_data.get('eventTypeCode', '')} — {account_display}"
     if resources:
         summary += f" ({len(resources)} resources)"
 
@@ -181,7 +183,7 @@ def _process_event(client: ServiceNowClient, payload: dict, snow_target: dict) -
         metadata_pairs=[
             ("Service", event_data.get("service", "")),
             ("Deadline", event_data.get("startTime", "")),
-            ("Account", event_data.get("affectedAccount", "")),
+            ("Account", account_display),
             ("Region", event_data.get("region", "")),
             ("Actionability", event_data.get("actionability", "")),
         ],

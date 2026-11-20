@@ -19,6 +19,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from resolve_core.jira_client import BulkCreateResult, JiraApiError, JiraNotFoundError
+from resolve_core.routing import lookup_account_name
 from resolve_core.jira_client import JiraClient as JiraClient  # noqa: keep as module-level for patching
 from resolve_core.ticket_builder import build_template_a, build_template_b
 
@@ -350,14 +351,17 @@ def _retry_failed_individually(
 
 def _resolve_routing_for_account(account_id: str, config_cache: dict) -> dict:
     """Resolve JIRA project for an account using cached config items."""
+    account_name = lookup_account_name(account_id, config_cache)
     if account_id:
         item = config_cache.get(f"ROUTING#{account_id}")
         if isinstance(item, dict) and item.get("jira_project"):
-            return {"resolvedProject": item["jira_project"], "issueType": item.get("jira_issue_type", "Task")}
+            return {"resolvedProject": item["jira_project"], "issueType": item.get("jira_issue_type", "Task"),
+                    "accountName": account_name}
     default = config_cache.get("ROUTING_DEFAULT")
     if isinstance(default, dict) and default.get("jira_project"):
-        return {"resolvedProject": default["jira_project"], "issueType": default.get("jira_issue_type", "Task")}
-    return {"resolvedProject": None, "issueType": "Task"}
+        return {"resolvedProject": default["jira_project"], "issueType": default.get("jira_issue_type", "Task"),
+                "accountName": account_name}
+    return {"resolvedProject": None, "issueType": "Task", "accountName": account_name}
 
 
 def _load_routing_cache(resources: list) -> dict:

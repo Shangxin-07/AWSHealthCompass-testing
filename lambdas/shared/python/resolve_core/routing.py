@@ -230,7 +230,43 @@ def _build_routing_result(
 # ===================================================================
 
 
+_MAX_ACCOUNT_NAME_LEN = 128
+
+
+def lookup_account_name(affected_account: Optional[str], config_cache: dict) -> str:
+    """Display name for an account from its ``ROUTING#`` item, or ``""``."""
+    if not (isinstance(affected_account, str)
+            and _ACCOUNT_ID_PATTERN.fullmatch(affected_account)):
+        return ""
+    item = config_cache.get(f"ROUTING#{affected_account}")
+    if not isinstance(item, dict):
+        return ""
+    name = item.get("account_name")
+    return name.strip()[:_MAX_ACCOUNT_NAME_LEN] if isinstance(name, str) else ""
+
+
+def _with_account_name(result: dict, affected_account: Optional[str], config_cache: dict) -> dict:
+    """Attach ``accountName`` to a routing result (whichever step resolved it)."""
+    result["accountName"] = lookup_account_name(affected_account, config_cache)
+    return result
+
+
 def resolve_account_routing(
+    affected_account: Optional[str],
+    config_cache: dict,
+    service: str = "",
+) -> dict:
+    """Resolve routing, then attach the account's display name.
+
+    See :func:`_resolve_account_routing_targets` for the failover chain.
+    """
+    return _with_account_name(
+        _resolve_account_routing_targets(affected_account, config_cache, service),
+        affected_account, config_cache,
+    )
+
+
+def _resolve_account_routing_targets(
     affected_account: Optional[str],
     config_cache: dict,
     service: str = "",
@@ -403,7 +439,7 @@ def resolve_routing(
                 strategy, account_tags, entities, config_cache,
             )
             if tag_result is not None:
-                return tag_result
+                return _with_account_name(tag_result, affected_account, config_cache)
         elif mode not in _VALID_MODES:
             # FINDING-IMPL-018-02: log warning for unexpected mode values
             logger.warning(
@@ -429,6 +465,7 @@ def resolve_routing(
             "issueType": result["issueType"],
             "fallbackUsed": True,
             "platforms": result.get("platforms", {}),
+            "accountName": result.get("accountName", ""),
         }
 
     return result
