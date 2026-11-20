@@ -107,3 +107,14 @@ def test_coverage_partial_on_time_budget(coverage, monkeypatch):
     import json
     body = json.loads(coverage.handle_routing_coverage({}, None)["body"])
     assert body["partial"] is True and table.scan.call_count == 1
+
+
+@pytest.mark.parametrize("cid,expected", [
+    ("EKS:AWS_EKS_PLANNED_LIFECYCLE_EVENT", "EKS"),
+    ("arn:aws:health:us-east-1::event/S3/AWS_S3_ACCOUNT_NOTIFICATION/AWS_S3_ACCOUNT_NOTIFICATION_abc", "S3"),
+    ("arn:aws:health:us-east-1::event/ELASTICACHE/X/Y", "ELASTICACHE"),
+    ("arn:aws:health:us-east-1::nonsense", ""),
+    ("", ""),
+])
+def test_extract_service(coverage, cid, expected):
+    assert coverage._extract_service(cid) == expected

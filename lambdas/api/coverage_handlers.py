@@ -184,7 +184,17 @@ def _default_reason(item: dict) -> str:
 
 
 def _extract_service(campaign_id: str) -> str:
-    """Extract service name from campaignId (format: SERVICE:version or eventArn)."""
+    """Extract the service name from a campaignId.
+
+    PLE campaigns use ``SERVICE:eventTypeCode``; every other campaign is keyed
+    by its Health event ARN (``arn:aws:health:<region>::event/<SERVICE>/...``),
+    where the first ``:``-segment is just ``arn``.
+    """
+    if not isinstance(campaign_id, str):
+        return ""
+    if campaign_id.startswith("arn:"):
+        _, sep, rest = campaign_id.partition(":event/")
+        return rest.split("/", 1)[0].upper() if sep and rest else ""
     if ":" in campaign_id:
         return campaign_id.split(":")[0].upper()
     return ""
