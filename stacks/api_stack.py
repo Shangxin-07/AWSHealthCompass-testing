@@ -887,6 +887,7 @@ class ApiStack(cdk.Stack):
                 "region": self.region,
             })],
             destination_bucket=dashboard_bucket,
+            cache_control=[s3_deployment.CacheControl.no_cache()],
             distribution=dashboard_distribution,
             distribution_paths=["/config.json"],
             prune=False,  # Shared bucket — CoreStack deploys dashboard assets here

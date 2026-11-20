@@ -486,6 +486,18 @@ class CoreStack(cdk.Stack):
                 f"Pass -c cloudfront_web_acl_arn=<arn> to attach an existing one."
             )
 
+        # SPA routing: rewrite extension-less paths (app routes) to /index.html
+        # at the edge. Replaces a distribution-wide 404->200 /index.html error
+        # mapping, which also answered missing /assets/*.js with HTML + 200; a
+        # browser then refuses the "script" and the page renders blank (seen
+        # mid-deploy). Missing files now return a real 404.
+        spa_rewrite = cloudfront.Function(
+            self, "DashboardSpaRewrite",
+            function_name="compass-dashboard-spa-rewrite",
+            comment="Rewrite extension-less paths to /index.html",
+            code=cloudfront.FunctionCode.from_file(file_path="stacks/cloudfront/spa_rewrite.js"),
+        )
+
         self.dashboard_distribution = cloudfront.Distribution(
             self, "DashboardDistribution",
             web_acl_id=cf_web_acl_id,  # full CLOUDFRONT WebACL ARN, or None
@@ -496,23 +508,15 @@ class CoreStack(cdk.Stack):
                 ),
                 viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                 cache_policy=cloudfront.CachePolicy.CACHING_OPTIMIZED,
+                function_associations=[cloudfront.FunctionAssociation(
+                    function=spa_rewrite,
+                    event_type=cloudfront.FunctionEventType.VIEWER_REQUEST,
+                )],
             ),
             default_root_object="index.html",
-            error_responses=[
-                # The 403->200 /index.html remap was REMOVED. CloudFront applies
-                # CustomErrorResponses keyed on the response STATUS CODE and DID
-                # catch the WAF-generated edge 403, masking blocked attacks as
-                # 200+SPA (empirically observed). With the 403 map gone, a
-                # WAF-edge block reaches the client as a true 403. The SPA
-                # deep-link fallback now runs via 404->200 (S3 returns 404 for
-                # missing keys because the OAI holds s3:ListBucket, granted above).
-                cloudfront.ErrorResponse(
-                    http_status=404,
-                    response_http_status=200,
-                    response_page_path="/index.html",
-                    ttl=Duration.seconds(0),
-                ),
-            ],
+            # No error_responses: SPA deep links are handled by spa_rewrite above.
+            # (A 403->200 remap was removed earlier because it masked WAF blocks;
+            # the 404->200 remap is gone because it masked missing assets.)
             minimum_protocol_version=cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
         )
 
@@ -578,18 +582,39 @@ class CoreStack(cdk.Stack):
         # sees a new asset and triggers the BucketDeployment custom resource.
         import time as _time
 
-        s3_deployment.BucketDeployment(
+        # Two uploads, in order: hashed assets first (immutable, long-cached),
+        # then index.html (no-cache). index.html therefore never references a
+        # bundle that hasn't been uploaded yet, and browsers always revalidate it.
+        deploy_hash = str(int(_time.time()))
+        assets_deployment = s3_deployment.BucketDeployment(
             self, "DashboardDeployment",
             sources=[s3_deployment.Source.asset(
                 "./dashboard/dist",
-                asset_hash=str(int(_time.time())),
+                asset_hash=deploy_hash,
                 asset_hash_type=cdk.AssetHashType.CUSTOM,
             )],
+            exclude=["index.html"],
+            cache_control=[s3_deployment.CacheControl.from_string(
+                "public, max-age=31536000, immutable")],
             destination_bucket=self.dashboard_bucket,
-            distribution=self.dashboard_distribution,
-            distribution_paths=["/*"],
             prune=False,  # False: ApiStack also writes config.json to this bucket
         )
+        index_deployment = s3_deployment.BucketDeployment(
+            self, "DashboardIndexDeployment",
+            sources=[s3_deployment.Source.asset(
+                "./dashboard/dist",
+                asset_hash=deploy_hash + "-index",
+                asset_hash_type=cdk.AssetHashType.CUSTOM,
+            )],
+            exclude=["*"],
+            include=["index.html"],
+            cache_control=[s3_deployment.CacheControl.no_cache()],
+            destination_bucket=self.dashboard_bucket,
+            distribution=self.dashboard_distribution,
+            distribution_paths=["/index.html", "/"],
+            prune=False,
+        )
+        index_deployment.node.add_dependency(assets_deployment)
 
         # ---------------------------------------------------------------
         # CDK Outputs for cross-stack / post-deploy reference
