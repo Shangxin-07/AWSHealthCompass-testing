@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import Tabs from '@cloudscape-design/components/tabs';
 import Container from '@cloudscape-design/components/container';
 import Header from '@cloudscape-design/components/header';
@@ -13,10 +13,26 @@ import Spinner from '@cloudscape-design/components/spinner';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import { apiFetch } from './api';
 import ResourceLifecycleTab from './ResourceLifecycleTab';
+import Autosuggest from '@cloudscape-design/components/autosuggest';
+
+interface TestAccount { accountId: string; name: string; registered: boolean; jiraProject: string; }
+
+/** Named synthetic accounts (GET /api/test/accounts). */
+function useTestAccounts(): TestAccount[] {
+  const [accounts, setAccounts] = useState<TestAccount[]>([]);
+  useEffect(() => {
+    apiFetch('/test/accounts').then((d: any) => setAccounts(d.accounts || [])).catch(() => {});
+  }, []);
+  return accounts;
+}
 
 function RouteTestTab() {
   const [service, setService] = useState('EKS');
   const [accountId, setAccountId] = useState('');
+  const testAccounts = useTestAccounts();
+  useEffect(() => {
+    if (!accountId && testAccounts.length) setAccountId(testAccounts[0].accountId);
+  }, [testAccounts]);
   const [resourceTags, setResourceTags] = useState<{key:string,value:string}[]>([]);
   const [accountTags, setAccountTags] = useState<{key:string,value:string}[]>([]);
   const [eventTypeCode, setEventTypeCode] = useState('');
@@ -66,8 +82,15 @@ function RouteTestTab() {
           <FormField label="Service">
             <Input value={service} onChange={({ detail }) => setService(detail.value)} placeholder="EKS" />
           </FormField>
-          <FormField label="Account ID">
-            <Input value={accountId} onChange={({ detail }) => setAccountId(detail.value)} placeholder="111111111111" />
+          <FormField label="Account ID" description="Pick a named test account, or type any 12-digit account ID.">
+            <Autosuggest
+              value={accountId}
+              onChange={({ detail }) => setAccountId(detail.value)}
+              options={testAccounts.map(a => ({ value: a.accountId, label: a.accountId, description: a.name }))}
+              placeholder="600000000001"
+              enteredTextLabel={v => `Use "${v}"`}
+              empty="No test accounts"
+            />
           </FormField>
           <FormField label="Event Type Code">
             <Input value={eventTypeCode} onChange={({ detail }) => setEventTypeCode(detail.value)} placeholder="AWS_EKS_PLANNED_LIFECYCLE_EVENT" />
@@ -157,7 +180,7 @@ function BulkGenerationTab() {
         method: 'POST',
         body: JSON.stringify({ count: parseInt(count) }),
       });
-      setResult({ type: 'success', msg: `${r.published || r.count} events triggered. Click Sync to see them.` });
+      setResult({ type: 'success', msg: `${r.published || r.count} events triggered across ${r.accounts ?? 10} named test accounts${r.namesRegistered ? ` (${r.namesRegistered} account names registered)` : ''}. Click Sync to see them.` });
     } catch (e: any) {
       setResult({ type: 'error', msg: e.message });
     } finally {
@@ -168,7 +191,7 @@ function BulkGenerationTab() {
   return (
     <Container header={<Header variant="h2">Bulk Event Generation</Header>}>
       <SpaceBetween size="m">
-        <Alert type="info">Inject synthetic Health events into the pipeline for testing.</Alert>
+        <Alert type="info">Inject synthetic Health events into the pipeline, spread across the named test accounts (lt-finance-prod, lt-research-hpc, …). Their account names are registered automatically if not already mapped.</Alert>
         <RadioGroup
           value={count}
           onChange={({ detail }) => setCount(detail.value)}

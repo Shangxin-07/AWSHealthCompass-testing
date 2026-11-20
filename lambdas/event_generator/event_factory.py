@@ -6,6 +6,11 @@ follows the AWS Health event schema, with the field variants Compass
 handles (RFC 2822 dates, string ``page``/``totalPages``, ``resourceTags``
 on entities, ``accountTags``, ``actionability``, ``backupEvent``).
 
+Entities follow the real EventBridge shape: no per-entity account field.
+The account is given once, as ``detail.affectedAccount`` (the Health API /
+reconciliation shape does carry ``awsAccountId`` per entity; EventBridge
+does not, and synthetic events must not hide that difference).
+
 This module was referenced by ``handler.py`` but absent from the
 repository (it was git-ignored as a "synth-time artifact" with nothing in
 the repo producing it), so the Event Generator failed at import.
@@ -71,7 +76,6 @@ def make_resources(
         )
         entities.append({
             "entityValue": value,
-            "awsAccountId": account,
             "lastUpdatedTime": now,
             "status": status,
             "resourceTags": dict(tags) if tags else {},

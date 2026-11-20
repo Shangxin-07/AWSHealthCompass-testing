@@ -87,7 +87,7 @@ def test_write_resources_reports_newly_resolved(env):
     from resolve_core.resources import write_resources
     camps.put_item(Item={"campaignId": "C2", "statsVersion": 1, "campaignType": "resource-level"})
     acct = "610000000003"
-    ents = lambda st: [{"entityValue": f"arn:aws:ecs:us-east-1:{acct}:cluster/x{i}", "awsAccountId": acct,
+    ents = lambda st: [{"entityValue": f"arn:aws:ecs:us-east-1:{acct}:cluster/x{i}",
                         "status": st} for i in range(2)]
     first = write_resources(res, camps, "C2", "resource-level", ents("PENDING"), {}, acct, "us-east-1", False, "t")
     assert first.newly_resolved == ()

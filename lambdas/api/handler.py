@@ -560,7 +560,7 @@ try:
         handle_campaign_breakdown, handle_create_tickets,
         handle_config_summary, handle_routing_default, handle_routing_discover,
         handle_routing_import, handle_dispatch_save, handle_reconcile, handle_sync,
-        handle_generate_events, handle_group_preview, handle_test_resource_status,
+        handle_generate_events, handle_group_preview, handle_test_resource_status, handle_test_accounts,
     )
 except ImportError:
     from dashboard_handlers import (
@@ -568,7 +568,7 @@ except ImportError:
         handle_campaign_breakdown, handle_create_tickets,
         handle_config_summary, handle_routing_default, handle_routing_discover,
         handle_routing_import, handle_dispatch_save, handle_reconcile, handle_sync,
-        handle_generate_events, handle_group_preview, handle_test_resource_status,
+        handle_generate_events, handle_group_preview, handle_test_resource_status, handle_test_accounts,
     )
 
 _ROUTES[("GET", "/api/campaigns")] = handle_campaigns_list
@@ -585,6 +585,7 @@ _ROUTES[("POST", "/api/reconcile")] = handle_reconcile
 _ROUTES[("POST", "/api/sync")] = handle_sync
 _ROUTES[("POST", "/api/generate-events")] = handle_generate_events
 _ROUTES[("POST", "/api/test/resource-status")] = handle_test_resource_status
+_ROUTES[("GET", "/api/test/accounts")] = handle_test_accounts
 
 
 # ===================================================================

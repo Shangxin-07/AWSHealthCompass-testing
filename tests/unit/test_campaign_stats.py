@@ -67,7 +67,7 @@ def _campaign(camps, cid=CID, stats_version=True, status="ACTIVE"):
 
 def _entities(account, n, status="PENDING", start=0):
     return [{"entityValue": f"arn:aws:eks:us-east-1:{account}:cluster/c{start + i}",
-             "awsAccountId": account, "status": status} for i in range(n)]
+             "status": status} for i in range(n)]
 
 
 def _write(res, camps, stats, account, ents, is_new=False, cid=CID):
@@ -139,7 +139,7 @@ def test_incremental_matches_recount_over_random_history(ddb):
     for step in range(60):
         acct = rnd.choice(accounts)
         ents = [{"entityValue": f"arn:aws:eks:us-east-1:{acct}:cluster/c{rnd.randrange(8)}",
-                 "awsAccountId": acct, "status": rnd.choice(["PENDING", "RESOLVED"])}
+                 "status": rnd.choice(["PENDING", "RESOLVED"])}
                 for _ in range(rnd.randrange(1, 4))]
         _write(res, camps, stats, acct, ents, is_new=(step == 0))
     incremental = _stats_by_acct(stats)
