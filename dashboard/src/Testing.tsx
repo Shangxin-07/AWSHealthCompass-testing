@@ -12,6 +12,7 @@ import Alert from '@cloudscape-design/components/alert';
 import Spinner from '@cloudscape-design/components/spinner';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import { apiFetch } from './api';
+import ResourceLifecycleTab from './ResourceLifecycleTab';
 
 function RouteTestTab() {
   const [service, setService] = useState('EKS');
@@ -194,6 +195,7 @@ export default function Testing() {
         tabs={[
           { label: 'Route Test', id: 'route-test', content: <RouteTestTab /> },
           { label: 'Bulk Generation', id: 'bulk-generation', content: <BulkGenerationTab /> },
+          { label: 'Resource Lifecycle', id: 'resource-lifecycle', content: <ResourceLifecycleTab /> },
         ]}
       />
     </SpaceBetween>

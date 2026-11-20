@@ -13,6 +13,7 @@ import logging
 import os
 import time
 import random
+import re
 
 import boto3
 
@@ -41,6 +42,11 @@ def lambda_handler(event: dict, context) -> dict:
         "request_id": getattr(context, "aws_request_id", "local"),
         "payload": event,
     }))
+
+    # --- Replay mode: explicit resources with chosen statuses ---
+    replay = event.get("replay")
+    if replay is not None:
+        return _handle_replay(replay)
 
     # --- Single event mode ---
     single_event = event.get("singleEvent")
@@ -151,6 +157,77 @@ def _handle_single_event(spec: dict, context) -> dict:
         return _error(500, "SQS_ERROR", str(exc))
 
     return _success([health_event["detail"]["eventArn"]], None)
+
+
+# ---------------------------------------------------------------------------
+# Replay mode
+# ---------------------------------------------------------------------------
+
+_REPLAY_STATUSES = frozenset({"PENDING", "RESOLVED"})
+_MAX_REPLAY_EVENTS = 50
+_MAX_REPLAY_ENTITIES = 1000
+_ACCOUNT_RE = re.compile(r"^\d{12}$")
+_SERVICE_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+_CODE_RE = re.compile(r"^[A-Z0-9_]{1,128}$")
+_EVENT_ARN_RE = re.compile(r"^arn:aws:health:[a-z0-9-]+::event/[\w/.-]{1,1800}$")
+
+
+def _handle_replay(specs):
+    """Send events that re-report existing resources with new statuses.
+
+    Each spec: {service, eventTypeCode, affectedAccount, eventArn, region,
+    entities: [{entityValue, status}], page?, totalPages?}. Used by the
+    dashboard's Resource Lifecycle test controls (POST /api/test/resource-status).
+    """
+    if not isinstance(specs, list) or not 0 < len(specs) <= _MAX_REPLAY_EVENTS:
+        return _error(400, "INVALID_REPLAY", f"replay must be a list of 1-{_MAX_REPLAY_EVENTS} events")
+    events, total = [], 0
+    for spec in specs:
+        if not isinstance(spec, dict):
+            return _error(400, "INVALID_REPLAY", "each replay event must be an object")
+        service, code = spec.get("service", ""), spec.get("eventTypeCode", "")
+        acct, arn = spec.get("affectedAccount", ""), spec.get("eventArn", "")
+        region = spec.get("region") or "us-east-1"
+        ents = spec.get("entities")
+        if not (_SERVICE_RE.match(str(service)) and _CODE_RE.match(str(code))
+                and _ACCOUNT_RE.match(str(acct)) and _EVENT_ARN_RE.match(str(arn))
+                and re.match(r"^[a-z]{2}(-[a-z]+)+-\d$", str(region))):
+            return _error(400, "INVALID_REPLAY", "invalid service, eventTypeCode, account, eventArn or region")
+        if not isinstance(ents, list) or not ents:
+            return _error(400, "INVALID_REPLAY", "entities must be a non-empty list")
+        total += len(ents)
+        if total > _MAX_REPLAY_ENTITIES:
+            return _error(400, "INVALID_REPLAY", f"at most {_MAX_REPLAY_ENTITIES} entities per request")
+        resources = []
+        for e in ents:
+            value, status = (e or {}).get("entityValue"), (e or {}).get("status")
+            if not isinstance(value, str) or not 0 < len(value) <= 2048 or status not in _REPLAY_STATUSES:
+                return _error(400, "INVALID_REPLAY", "each entity needs an entityValue and status PENDING|RESOLVED")
+            resources.append({"entityValue": value, "awsAccountId": acct, "status": status,
+                              "lastUpdatedTime": time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime()),
+                              "resourceTags": {}})
+        events.append(make_health_event(
+            service=service, affected_account=acct, event_type_code=code,
+            resources=resources, region=region,
+            page=str(spec.get("page", "1")), total_pages=str(spec.get("totalPages", "1")),
+            detail={"eventArn": arn},
+        ))
+
+    queue_url = _INGESTION_QUEUE_URL
+    if not queue_url:
+        return _error(500, "MISSING_QUEUE_URL", "INGESTION_QUEUE_URL environment variable not set")
+    sqs_client = boto3.client("sqs")
+    failed = []
+    for i, ev in enumerate(events):
+        try:
+            sqs_client.send_message(QueueUrl=queue_url, MessageBody=json.dumps(ev))
+        except Exception as exc:  # noqa: BLE001 — report per event
+            failed.append({"index": i, "errorCode": "SQS_ERROR", "errorMessage": str(exc)[:200]})
+    result = {"statusCode": 207 if failed else 200, "published": len(events) - len(failed),
+              "entities": total, "scenario": "replay"}
+    if failed:
+        result["failedEvents"] = failed
+    return result
 
 
 # ---------------------------------------------------------------------------
