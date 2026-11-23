@@ -3,7 +3,10 @@
 REQUEST-type Lambda authorizer for API Gateway.
 Accepts EITHER:
   - Authorization: Bearer <jwt> — validates Cognito JWT
-  - x-api-key: <key> — validates against configured API key value
+  - x-api-key: <key> — validates against the deployment's API Gateway key,
+    whose value is read at runtime (GetApiKey) and cached; only the key's ID
+    is configured, so the secret value is never stored in the function's
+    environment
 
 Returns IAM policy document with context: userId, groups, authMethod.
 Fail-closed: any validation failure = Deny.
@@ -15,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import hmac
 import time
 import urllib.request
 from base64 import urlsafe_b64decode
@@ -26,7 +30,15 @@ logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 USER_POOL_ID = os.environ.get("USER_POOL_ID", "")
 APP_CLIENT_ID = os.environ.get("APP_CLIENT_ID", "")
 REGION = os.environ.get("REGION", os.environ.get("AWS_REGION", "us-east-1"))
-API_KEY_VALUE = os.environ.get("API_KEY_VALUE", "")
+API_KEY_ID = os.environ.get("API_KEY_ID", "")
+
+# API key value cache: refreshed every _API_KEY_TTL_S, and on a mismatch at
+# most every _API_KEY_MISS_REFRESH_S (picks up a rotated key quickly without
+# letting bad keys drive GetApiKey traffic).
+_API_KEY_TTL_S = 300
+_API_KEY_MISS_REFRESH_S = 60
+_api_key_cache = {"value": None, "fetched_at": 0.0}
+_apigw = None
 
 ISSUER = f"https://cognito-idp.{REGION}.amazonaws.com/{USER_POOL_ID}"
 JWKS_URL = f"{ISSUER}/.well-known/jwks.json"
@@ -230,14 +242,48 @@ def _fetch_jwks() -> dict:
 # API Key Validation
 # ===================================================================
 
+def _fetch_api_key_value() -> str | None:
+    """Read the API key's value from API Gateway. None on failure (fail closed)."""
+    global _apigw
+    if not API_KEY_ID:
+        logger.error("API_KEY_ID not configured")
+        return None
+    try:
+        if _apigw is None:
+            import boto3
+            from botocore.config import Config
+            _apigw = boto3.client("apigateway", region_name=REGION, config=Config(
+                connect_timeout=2, read_timeout=3, retries={"max_attempts": 3, "mode": "adaptive"}))
+        value = _apigw.get_api_key(apiKey=API_KEY_ID, includeValue=True).get("value")
+        return value if isinstance(value, str) and value else None
+    except Exception as exc:  # noqa: BLE001 — any failure denies API-key auth
+        logger.error("API key lookup failed — exception_type=%s", type(exc).__name__)
+        return None
+
+
+def _current_api_key(force: bool = False) -> str | None:
+    now = time.time()
+    age = now - _api_key_cache["fetched_at"]
+    if force or _api_key_cache["value"] is None or age >= _API_KEY_TTL_S:
+        value = _fetch_api_key_value()
+        _api_key_cache["fetched_at"] = now
+        if value is not None:
+            _api_key_cache["value"] = value
+    return _api_key_cache["value"]
+
+
 def _validate_api_key(api_key: str) -> bool:
-    """Validate API key against configured value."""
-    if not API_KEY_VALUE:
-        logger.error("API_KEY_VALUE not configured")
+    """Validate an API key against the deployment's key (constant-time)."""
+    if not api_key:
         return False
-    # Constant-time comparison to prevent timing attacks
-    import hmac
-    return hmac.compare_digest(api_key, API_KEY_VALUE)
+    expected = _current_api_key()
+    if expected and hmac.compare_digest(api_key, expected):
+        return True
+    # Possible rotation: refresh, but not more than once per interval.
+    if time.time() - _api_key_cache["fetched_at"] >= _API_KEY_MISS_REFRESH_S:
+        expected = _current_api_key(force=True)
+        return bool(expected) and hmac.compare_digest(api_key, expected)
+    return False
 
 
 # ===================================================================

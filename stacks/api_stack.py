@@ -28,7 +28,6 @@ from aws_cdk import (
     aws_cloudfront as cloudfront,
     aws_s3_deployment as s3_deployment,
     aws_wafv2 as wafv2,
-    custom_resources as cr,
 )
 from constructs import Construct
 
@@ -651,37 +650,11 @@ class ApiStack(cdk.Stack):
 
         authorizer = None
         if auth_mode != "api_key_only":
-            # Custom resource to retrieve API key value for authorizer validation
-            get_api_key_value = cr.AwsCustomResource(
-                self, "GetApiKeyValue",
-                on_create=cr.AwsSdkCall(
-                    service="APIGateway",
-                    action="getApiKey",
-                    parameters={
-                        "apiKey": self.api_key.key_id,
-                        "includeValue": True,
-                    },
-                    physical_resource_id=cr.PhysicalResourceId.of("compass-api-key-value"),
-                    output_paths=["value"],
-                ),
-                on_update=cr.AwsSdkCall(
-                    service="APIGateway",
-                    action="getApiKey",
-                    parameters={
-                        "apiKey": self.api_key.key_id,
-                        "includeValue": True,
-                    },
-                    physical_resource_id=cr.PhysicalResourceId.of("compass-api-key-value"),
-                    output_paths=["value"],
-                ),
-                policy=cr.AwsCustomResourcePolicy.from_statements([
-                    iam.PolicyStatement(
-                        actions=["apigateway:GET"],
-                        resources=[f"arn:aws:apigateway:{self.region}::/apikeys/{self.api_key.key_id}"],
-                    ),
-                ]),
-            )
-
+            # The authorizer reads the API key's value at runtime (cached);
+            # only the key ID is configured. Previously a deploy-time custom
+            # resource (getApiKey) put the value in the function's environment:
+            # visible to anyone who can read the function configuration, and
+            # prone to API Gateway throttling on a fresh deploy.
             authorizer_log_group = logs.LogGroup(
                 self, "AuthorizerLogGroup",
                 log_group_name="/aws/lambda/compass-cognito-authorizer",
@@ -702,10 +675,15 @@ class ApiStack(cdk.Stack):
                 environment={
                     "USER_POOL_ID": self.user_pool.user_pool_id,
                     "APP_CLIENT_ID": self.app_client.user_pool_client_id,
-                    "API_KEY_VALUE": get_api_key_value.get_response_field("value"),
+                    "API_KEY_ID": self.api_key.key_id,
                     "LOG_LEVEL": log_level,
                 },
             )
+
+            self.authorizer_fn.add_to_role_policy(iam.PolicyStatement(
+                actions=["apigateway:GET"],
+                resources=[f"arn:aws:apigateway:{self.region}::/apikeys/{self.api_key.key_id}"],
+            ))
 
             # C-4: Cache TTL = 300s; group changes propagate within 5 minutes
             # FIX: Use CfnAuthorizer (L1) with empty identity_source so API Gateway
