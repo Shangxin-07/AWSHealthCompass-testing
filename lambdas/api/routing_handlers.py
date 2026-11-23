@@ -877,8 +877,14 @@ def handle_routing_discover(event, context):
     except ClientError as e:
         error_code = e.response["Error"]["Code"]
         if error_code == "AccessDeniedException":
+            # Usually not IAM: Organizations only answers ListAccounts in the
+            # management account or a delegated administrator account.
             return _error(403, "CFG_ORGS_ACCESS_DENIED",
-                          "Lambda does not have permission to list AWS Organizations accounts.")
+                          "This AWS account can't list your organization's accounts. AWS "
+                          "Organizations only allows that from the management account or a "
+                          "delegated administrator account. Use Bulk Import (CSV) instead, "
+                          "with an account list exported by someone with management-account "
+                          "access (aws organizations list-accounts).")
         if error_code == "AWSOrganizationsNotInUseException":
             return _error(400, "CFG_ORGS_NOT_ENABLED",
                           "AWS Organizations is not enabled for this account.")
