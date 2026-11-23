@@ -36,6 +36,7 @@ from itsm_orchestrator import (
     create_template_a_ticket,
     create_template_b_ticket,
     update_tickets,
+    account_has_ticket,
 )
 
 logger = logging.getLogger("compass")
@@ -806,6 +807,17 @@ def handle(event: dict, context: Any) -> dict:
         action = str(event_data.get("action") or metadata.get("action") or "CREATE")
         campaign_type = event_data.get("campaignType", "")
         resources = payload.get("resources", [])
+
+        # The Processor sends RESOURCE_UPDATE whenever the campaign already
+        # exists, so in a merged (org-wide) campaign an account's FIRST event
+        # arrives as an update. With no ticket to update, create one; the
+        # create path's duplicate check still guards against doubles.
+        if action == "RESOURCE_UPDATE" and not account_has_ticket(
+                _resources_table, str(event_data.get("campaignId", "")),
+                str(event_data.get("affectedAccount", ""))):
+            logger.info("RESOURCE_UPDATE for an account without a ticket — creating — campaign_id=%s",
+                        str(event_data.get("campaignId", ""))[:_MAX_LOG_LEN])
+            action = "CREATE"
 
         if action == "RESOURCE_UPDATE":
             success = _update_tickets_jira(payload, jira, config, request_id)
