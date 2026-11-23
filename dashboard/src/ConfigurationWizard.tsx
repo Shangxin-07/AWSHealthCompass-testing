@@ -21,7 +21,7 @@ import type { OnboardingConfig } from './types';
 import { DispatchRule, DispatchMode, ActionabilityFilter, buildDispatchBody } from './types/dispatch';
 import { apiFetch } from './api';
 import { APP_NAME } from './branding';
-import { parseApiError } from './errors';
+import { parseApiError, serverErrorMessage } from './errors';
 import { usePlatformLabels } from './PlatformContext';
 import TagRoutingMappingsEditor from './components/TagRoutingMappingsEditor';
 import { TagMappingRow, TagMappingsSaveResult, getUpsertRows, hasTagMappingClientErrors, persistTagMappings } from './components/tagMappings';
@@ -263,7 +263,7 @@ export default function ConfigurationWizard({ config, onSave }: Props) {
       const r = await apiFetch('/config/routing/discover', { method: 'POST' });
       const accts = (r.accounts || []).map((a: any) => ({ account_id: a.accountId, account_name: a.accountName, jira_project: '', snow_assignment_group_id: '' }));
       setAccountMappings(accts);
-    } catch (e: any) { alert(`Failed: ${e.message}`); }
+    } catch (e: any) { alert(`Couldn't load accounts from AWS Organizations.\n\n${serverErrorMessage(e)}`); }
     finally { setLoadingOrg(false); }
   };
 

@@ -19,6 +19,7 @@ import Textarea from '@cloudscape-design/components/textarea';
 import ColumnLayout from '@cloudscape-design/components/column-layout';
 import Spinner from '@cloudscape-design/components/spinner';
 import { apiFetch } from '../api';
+import { serverErrorMessage } from '../errors';
 import { APP_NAME } from '../branding';
 import TagRoutingMappingsEditor from '../components/TagRoutingMappingsEditor';
 import { TagMappingRow, TagMappingsSaveResult, getUpsertRows, hasTagMappingClientErrors, persistTagMappings } from '../components/tagMappings';
@@ -541,7 +542,8 @@ export default function RoutingEditModal({ visible, onDismiss, onSave }: Routing
         setOrgError(null);
       }
     } catch (err: unknown) {
-      setOrgError(parseApiError(err));
+      // The server explains why (e.g. not the management/delegated admin account).
+      setOrgError(serverErrorMessage(err));
     } finally {
       setLoadingOrg(false);
     }

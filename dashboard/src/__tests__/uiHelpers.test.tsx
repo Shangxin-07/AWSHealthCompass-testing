@@ -26,3 +26,16 @@ describe('uiHelpers', () => {
     expect(ticketsSummary(0, 0)).toBe('—');
   });
 });
+
+import { serverErrorMessage } from '../errors';
+
+describe('serverErrorMessage', () => {
+  it("returns the server's message from an API error body", () => {
+    const e = new Error('API 403: {"error": {"code": "CFG_ORGS_ACCESS_DENIED", "message": "Use Bulk Import (CSV) instead."}}');
+    expect(serverErrorMessage(e)).toBe('Use Bulk Import (CSV) instead.');
+  });
+  it('falls back to the generic mapping', () => {
+    expect(serverErrorMessage(new Error('API 403: not json'))).toBe("You don't have permission to modify this configuration.");
+    expect(serverErrorMessage('x')).toBe('An unexpected error occurred.');
+  });
+});

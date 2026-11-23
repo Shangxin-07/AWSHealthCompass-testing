@@ -22,3 +22,23 @@ export function parseApiError(error: unknown): string {
   if (status >= 500) return 'An unexpected error occurred. Please try again.';
   return body;
 }
+
+
+/**
+ * The server's own message from an `apiFetch` error ("API <status>: <json>"
+ * with {"error": {"message"}}), for errors whose explanation matters more
+ * than a generic status mapping. Falls back to `parseApiError`.
+ */
+export function serverErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    const match = error.message.match(/^API \d+: (.+)$/s);
+    if (match) {
+      try {
+        const body = JSON.parse(match[1]);
+        const msg = body?.error?.message;
+        if (typeof msg === 'string' && msg) return msg;
+      } catch { /* not JSON */ }
+    }
+  }
+  return parseApiError(error);
+}
