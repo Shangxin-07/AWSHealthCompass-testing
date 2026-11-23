@@ -470,6 +470,15 @@ def _get_resources_by_ticket(resources_table, campaign_id: str) -> dict:
     return resources_by_ticket
 
 
+def account_has_ticket(resources_table, campaign_id: str, account_id: str) -> bool:
+    """Whether the account already has a ticket in this campaign."""
+    if not account_id:
+        return False
+    return any(r.get("accountId") == account_id
+               for rows in _get_resources_by_ticket(resources_table, campaign_id).values()
+               for r in rows)
+
+
 def _should_post_comment(campaigns_table, campaign_id: str, is_fully_resolved: bool) -> bool:
     """Check burndown comment frequency guard."""
     if is_fully_resolved:

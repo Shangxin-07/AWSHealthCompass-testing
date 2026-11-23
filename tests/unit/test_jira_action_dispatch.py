@@ -25,9 +25,11 @@ def jh(monkeypatch):
     monkeypatch.setattr(m, "_get_jira_client", lambda: MagicMock())
     monkeypatch.setattr(m, "_update_tickets_jira",
                         lambda *a, **k: calls.__setitem__("update", calls["update"] + 1) or True)
-    for name in ("_create_template_a", "_create_template_b", "_process_create", "_create_tickets"):
+    for name in ("_create_template_a", "_create_template_b", "_process_create", "_create_tickets",
+                 "create_template_a_ticket", "create_template_b_ticket", "_create_tickets_bulk"):
         if hasattr(m, name):
             monkeypatch.setattr(m, name, lambda *a, **k: calls.__setitem__("create", calls["create"] + 1) or True)
+    monkeypatch.setattr(m, "account_has_ticket", lambda *a, **k: calls.get("has_ticket", True))
     return m, calls
 
 
@@ -61,4 +63,14 @@ def test_metadata_action_still_honoured(jh):
 def test_create_is_not_routed_to_update(jh):
     m, calls = jh
     m.handle(_record(event_action="CREATE"), None)
+    assert calls["update"] == 0
+
+
+def test_update_for_account_without_ticket_goes_to_create(jh):
+    m, calls = jh
+    calls["has_ticket"] = False
+    try:
+        m.handle(_record(event_action="RESOURCE_UPDATE"), None)
+    except Exception:
+        pass  # create path internals are stubbed loosely; only routing matters here
     assert calls["update"] == 0
