@@ -74,3 +74,13 @@ def test_stats_table_access(api_template, role):
 def test_api_role_can_read_system_status(api_template):
     actions = _actions_for_role(api_template, "ApiLambdaServiceRole")
     assert {"sqs:GetQueueUrl", "sqs:GetQueueAttributes", "cloudwatch:DescribeAlarms"} <= actions, sorted(actions)
+
+
+def test_authorizer_reads_key_at_runtime_not_from_env(api_template):
+    fns = [r for r in api_template["Resources"].values() if r["Type"] == "AWS::Lambda::Function"
+           and r["Properties"].get("FunctionName") == "compass-cognito-authorizer"]
+    assert fns, "authorizer not found"
+    env = fns[0]["Properties"]["Environment"]["Variables"]
+    assert "API_KEY_ID" in env and "API_KEY_VALUE" not in env
+    assert "apigateway:GET" in _actions_for_role(api_template, "CognitoAuthorizerServiceRole")
+    assert not any(r["Type"] == "Custom::AWS" for r in api_template["Resources"].values())
