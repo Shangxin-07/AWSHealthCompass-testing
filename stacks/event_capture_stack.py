@@ -1,7 +1,17 @@
-"""CompassEventCapture CDK Stack — us-west-2.
+"""CompassEventCapture CDK Stack — one per capture Region.
 
-Captures org-level AWS Health events via Amazon EventBridge and forwards
-them cross-region to the Amazon SQS Ingestion Queue in us-east-1.
+Captures AWS Health events via Amazon EventBridge in this stack's Region and
+forwards them to the Amazon SQS Ingestion Queue in the primary Region (same
+Region or cross-Region).
+
+Deployed by app.py according to -c event_capture:
+  simplified (default)  one stack in us-west-2, AWS Health's "simplified
+                        integration" (account-specific events from all
+                        standard-partition Regions; not highly available)
+  regional              one stack per Region in -c capture_regions (default:
+                        primary Region + us-east-1, where AWS Health delivers
+                        global events). Needs no us-west-2 access.
+  none                  no capture stacks (reconciliation / test tools only)
 
 Resources:
   - EventBridge rule (aws.health, scheduledChange + accountNotification)
@@ -33,9 +43,11 @@ HEALTH_EVENT_RULE_NAME = "compass-health-event-capture"
 
 class EventCaptureStack(cdk.Stack):
     def __init__(self, scope: Construct, id: str, *,
-                 ingestion_queue_arn: str, ops_alert_email: str, **kwargs) -> None:
+                 ingestion_queue_arn: str, ops_alert_email: str,
+                 ops_alerts_topic: sns.ITopic = None, **kwargs) -> None:
+        region_label = kwargs["env"].region if kwargs.get("env") else "us-west-2"
         super().__init__(scope, id,
-                         description="(uksb-1xprlbuzr3) Compass us-west-2 EventBridge Health event capture",
+                         description=f"(uksb-1xprlbuzr3) Compass {region_label} EventBridge Health event capture",
                          **kwargs)
 
         # ---------------------------------------------------------------
@@ -48,10 +60,16 @@ class EventCaptureStack(cdk.Stack):
         # exports/imports. Same encryption/SSL posture as CoreStack's
         # OpsAlertsTopic, subscribed to the same operator email address.
         # ---------------------------------------------------------------
+        # In the primary Region the CoreStack topic is passed in (same name
+        # would collide); elsewhere a Region-local topic is created.
+        if ops_alerts_topic is not None:
+            self.ops_alerts_topic = ops_alerts_topic
+            self._init_rest(ingestion_queue_arn, region_label, own_topic=False)
+            return
         self.ops_alerts_topic = sns.Topic(
             self, "OpsAlertsTopicWest",
             topic_name="compass-ops-alerts",
-            display_name="Compass Operational Alerts (us-west-2)",
+            display_name=f"Compass Operational Alerts ({region_label})",
             enforce_ssl=True,
             master_key=kms.Alias.from_alias_name(self, "OpsAlertsTopicKeyAlias", "alias/aws/sns"),
         )
@@ -74,7 +92,9 @@ class EventCaptureStack(cdk.Stack):
                 conditions={"StringEquals": {"aws:SourceAccount": self.account}},
             )
         )
+        self._init_rest(ingestion_queue_arn, region_label, own_topic=True)
 
+    def _init_rest(self, ingestion_queue_arn: str, region_label: str, own_topic: bool) -> None:
         # DLQ for EventBridge delivery failures.
         # Encrypted at rest + enforce SSL.
         self.dlq = sqs.Queue(self, "EventBridgeDLQ",
@@ -131,4 +151,5 @@ class EventCaptureStack(cdk.Stack):
         CfnOutput(self, "EventBridgeRuleArn",
             value=f"arn:aws:events:{self.region}:{self.account}:rule/{HEALTH_EVENT_RULE_NAME}")
         CfnOutput(self, "EventBridgeDLQUrl", value=self.dlq.queue_url)
-        CfnOutput(self, "OpsAlertsTopicArnWest", value=self.ops_alerts_topic.topic_arn)
+        if own_topic:
+            CfnOutput(self, "OpsAlertsTopicArnWest", value=self.ops_alerts_topic.topic_arn)

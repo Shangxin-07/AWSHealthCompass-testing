@@ -21,27 +21,50 @@ primary_region = app.node.try_get_context("primary_region") or "us-east-1"
 if not re.fullmatch(r"[a-z]{2}(-[a-z]+)+-\d", primary_region):
     raise ValueError(f"Invalid primary_region context value: {primary_region!r}")
 
-# The us-west-2 Health capture stack is on by default. -c deploy_event_capture=false
-# skips it (e.g. for load tests, or where org policy blocks us-west-2); events
-# then arrive only via reconciliation or the test tools.
-deploy_event_capture = app.node.try_get_context("deploy_event_capture") != "false"
+# AWS Health event capture (see stacks/event_capture_stack.py):
+#   -c event_capture=simplified  (default) one us-west-2 rule, AWS Health's
+#                                "simplified integration"
+#   -c event_capture=regional    one rule per Region in -c capture_regions
+#                                (default: primary Region + us-east-1, where
+#                                global Health events are delivered); no
+#                                us-west-2 access needed
+#   -c event_capture=none        no capture rules (reconciliation/test tools only)
+# -c deploy_event_capture=false is kept as an alias for none.
+event_capture = app.node.try_get_context("event_capture") or "simplified"
+if app.node.try_get_context("deploy_event_capture") == "false":
+    event_capture = "none"
+if event_capture not in ("simplified", "regional", "none"):
+    raise ValueError(f"Invalid event_capture context value: {event_capture!r}")
+_REGION_RE = r"[a-z]{2}(-[a-z]+)+-\d"
+if event_capture == "simplified":
+    capture_regions = ["us-west-2"]
+elif event_capture == "regional":
+    raw = app.node.try_get_context("capture_regions")
+    capture_regions = ([r.strip() for r in raw.split(",") if r.strip()] if raw
+                       else [primary_region, "us-east-1"])
+    capture_regions = list(dict.fromkeys(capture_regions))   # de-duplicate, keep order
+    bad = [r for r in capture_regions if not re.fullmatch(_REGION_RE, r)]
+    if bad or not capture_regions:
+        raise ValueError(f"Invalid capture_regions: {raw!r}")
+else:
+    capture_regions = []
 
 env_primary = cdk.Environment(
     account=app.node.try_get_context("account"),
     region=primary_region,
 )
-env_west = cdk.Environment(
-    account=app.node.try_get_context("account"),
-    region="us-west-2",
-)
+core = CoreStack(app, "CompassCore", env=env_primary, capture_regions=tuple(capture_regions))
 
-core = CoreStack(app, "CompassCore", env=env_primary)
-
-if deploy_event_capture:
-    EventCaptureStack(app, "CompassEventCapture",
-        env=env_west,
+for capture_region in capture_regions:
+    same_region = capture_region == primary_region
+    EventCaptureStack(app,
+        # Simplified mode keeps the original stack name.
+        "CompassEventCapture" if event_capture == "simplified" else f"CompassEventCapture-{capture_region}",
+        env=cdk.Environment(account=app.node.try_get_context("account"), region=capture_region),
         ingestion_queue_arn=core.ingestion_queue.queue_arn,
         ops_alert_email=core.ops_alert_email,
+        # Same Region as CoreStack: reuse its alarm topic (same name would collide).
+        ops_alerts_topic=core.ops_alerts_topic if same_region else None,
     )
 
 jira = JiraIntegrationStack(app, "CompassJira",
@@ -76,6 +99,7 @@ if app.node.try_get_context("deploy_test_tools") == "true":
         env=env_primary,
         ingestion_queue_arn=core.ingestion_queue.queue_arn,
         ingestion_queue_url=core.ingestion_queue.queue_url,
+        create_health_rule=primary_region not in capture_regions,
     )
 
 ApiStack(app, "CompassApi",

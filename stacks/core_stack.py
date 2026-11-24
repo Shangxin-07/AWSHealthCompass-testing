@@ -39,7 +39,8 @@ from stacks.waf_rules import build_waf_rules
 
 
 class CoreStack(cdk.Stack):
-    def __init__(self, scope: Construct, id: str, **kwargs) -> None:
+    def __init__(self, scope: Construct, id: str, *,
+                 capture_regions: tuple = ("us-west-2",), **kwargs) -> None:
         super().__init__(scope, id,
                          description="(uksb-1xprlbuzr3) Compass core: SQS/SNS/DynamoDB/Processor/S3/CloudFront WAF",
                          **kwargs)
@@ -154,27 +155,31 @@ class CoreStack(cdk.Stack):
             ),
         )
 
-        # Cross-region resource policy: allow EventBridge from us-west-2.
-        # ArnEquals with exact rule name + SourceAccount.
+        # Resource policy: allow the Health capture rule in each capture
+        # Region (see -c event_capture in app.py). ArnEquals with the exact
+        # rule name + SourceAccount.
         from stacks.event_capture_stack import HEALTH_EVENT_RULE_NAME
-        self.ingestion_queue.add_to_resource_policy(iam.PolicyStatement(
-            principals=[iam.ServicePrincipal("events.amazonaws.com")],
-            actions=["sqs:SendMessage"],
-            resources=[self.ingestion_queue.queue_arn],
-            conditions={
-                "ArnEquals": {
-                    "aws:SourceArn": f"arn:aws:events:us-west-2:{self.account}:rule/{HEALTH_EVENT_RULE_NAME}",
+        for capture_region in capture_regions:
+            self.ingestion_queue.add_to_resource_policy(iam.PolicyStatement(
+                principals=[iam.ServicePrincipal("events.amazonaws.com")],
+                actions=["sqs:SendMessage"],
+                resources=[self.ingestion_queue.queue_arn],
+                conditions={
+                    "ArnEquals": {
+                        "aws:SourceArn": f"arn:aws:events:{capture_region}:{self.account}:rule/{HEALTH_EVENT_RULE_NAME}",
+                    },
+                    "StringEquals": {
+                        "aws:SourceAccount": self.account,
+                    },
                 },
-                "StringEquals": {
-                    "aws:SourceAccount": self.account,
-                },
-            },
-        ))
+            ))
 
         # Allow test EventBridge rule (primary region) when deploy_test_tools is enabled.
         # The test rule uses its own IAM role with sqs:SendMessage, but SQS
         # resource policy must also allow the EventBridge service principal.
-        if self.node.try_get_context("deploy_test_tools") == "true":
+        # (Not needed when a regional capture rule already covers the primary Region.)
+        if (self.node.try_get_context("deploy_test_tools") == "true"
+                and self.region not in capture_regions):
             from stacks.test_tools_stack import TEST_HEALTH_EVENT_RULE_NAME
             self.ingestion_queue.add_to_resource_policy(iam.PolicyStatement(
                 principals=[iam.ServicePrincipal("events.amazonaws.com")],

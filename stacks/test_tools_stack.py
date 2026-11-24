@@ -31,6 +31,7 @@ class TestToolsStack(cdk.Stack):
     def __init__(self, scope: Construct, id: str, *,
                  ingestion_queue_arn: str,
                  ingestion_queue_url: str,
+                 create_health_rule: bool = True,
                  **kwargs) -> None:
         super().__init__(scope, id,
                          description="(uksb-1xprlbuzr3) Compass test event generator — TEST ONLY. Do not deploy to production accounts.",
@@ -83,27 +84,31 @@ class TestToolsStack(cdk.Stack):
         # Uses CfnRule (L1) with a dedicated IAM role to avoid cyclic
         # cross-stack references. Same pattern as EventCaptureStack.
         # ---------------------------------------------------------------
-        event_role = iam.Role(self, "TestEventBridgeRole",
-            assumed_by=iam.ServicePrincipal("events.amazonaws.com"),
-        )
-        event_role.add_to_policy(iam.PolicyStatement(
-            actions=["sqs:SendMessage"],
-            resources=[ingestion_queue_arn],
-        ))
+        # Skipped when a regional capture rule already covers the primary
+        # Region (it would deliver every real Health event twice).
+        self.test_rule = None
+        if create_health_rule:
+            event_role = iam.Role(self, "TestEventBridgeRole",
+                assumed_by=iam.ServicePrincipal("events.amazonaws.com"),
+            )
+            event_role.add_to_policy(iam.PolicyStatement(
+                actions=["sqs:SendMessage"],
+                resources=[ingestion_queue_arn],
+            ))
 
-        self.test_rule = events.CfnRule(self, "TestHealthEventRule",
-            name=TEST_HEALTH_EVENT_RULE_NAME,
-            description="TEST ONLY — Routes synthetic Health events to ingestion queue",
-            event_pattern={
-                "source": ["aws.health"],
-                "detail-type": ["AWS Health Event"],
-            },
-            targets=[events.CfnRule.TargetProperty(
-                id="IngestionQueue",
-                arn=ingestion_queue_arn,
-                role_arn=event_role.role_arn,
-            )],
-        )
+            self.test_rule = events.CfnRule(self, "TestHealthEventRule",
+                name=TEST_HEALTH_EVENT_RULE_NAME,
+                description="TEST ONLY — Routes synthetic Health events to ingestion queue",
+                event_pattern={
+                    "source": ["aws.health"],
+                    "detail-type": ["AWS Health Event"],
+                },
+                targets=[events.CfnRule.TargetProperty(
+                    id="IngestionQueue",
+                    arn=ingestion_queue_arn,
+                    role_arn=event_role.role_arn,
+                )],
+            )
 
         # ---------------------------------------------------------------
         # Outputs
