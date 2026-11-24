@@ -152,7 +152,9 @@ Many organizations restrict regions with SCPs. These CDK context flags let Compa
 | Flag | Default | Effect |
 |------|---------|--------|
 | `-c primary_region=<region>` | `us-east-1` | Deploys all processing infrastructure (CompassCore, CompassApi, CompassJira, CompassServiceNow, CompassTestTools) to this region. The Reconciliation Lambda still calls the Health Organizational View API's us-east-1 endpoint. |
-| `-c deploy_event_capture=false` | `true` | Skips the us-west-2 `CompassEventCapture` stack. **No real-time Health events are captured**; events arrive only via daily reconciliation or the test tools. Intended for load tests or until an SCP exception for us-west-2 is in place. |
+| `-c event_capture=simplified\|regional\|none` | `simplified` | How AWS Health events are captured in real time. **simplified**: one `CompassEventCapture` stack in us-west-2 (AWS Health's [simplified integration](https://docs.aws.amazon.com/health/latest/ug/choosing-a-region.html): account-specific events from all standard Regions, no high availability). **regional**: one `CompassEventCapture-<region>` stack per Region in `-c capture_regions` (default: the primary Region + us-east-1, where AWS Health delivers global events such as IAM); needs no us-west-2 access, and covers the Regions your workloads run in. **none**: no capture; events arrive only via daily reconciliation or the test tools. |
+| `-c capture_regions=<r1>,<r2>` | primary + us-east-1 | With `event_capture=regional`: the Regions to capture in. Add every Region your accounts run workloads in. |
+| `-c deploy_event_capture=false` | — | Legacy alias for `event_capture=none`. |
 | `-c cloudfront_web_acl_arn=<arn>` | unset | Attaches an existing CLOUDFRONT-scope WebACL (e.g. org-managed) to the dashboard instead of creating one. |
 
 CLOUDFRONT-scope WebACLs can only be created in us-east-1. If `primary_region` is anything else and no `cloudfront_web_acl_arn` is given, the dashboard distribution is deployed **without** a CloudFront WAF and synth prints a warning. The API Gateway's REGIONAL WebACL is still created in the primary region.
