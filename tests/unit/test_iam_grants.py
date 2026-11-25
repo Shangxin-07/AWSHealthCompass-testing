@@ -84,3 +84,9 @@ def test_authorizer_reads_key_at_runtime_not_from_env(api_template):
     assert "API_KEY_ID" in env and "API_KEY_VALUE" not in env
     assert "apigateway:GET" in _actions_for_role(api_template, "CognitoAuthorizerServiceRole")
     assert not any(r["Type"] == "Custom::AWS" for r in api_template["Resources"].values())
+
+
+def test_reconciliation_can_list_affected_accounts(api_template):
+    actions = _actions_for_role(api_template, "ReconciliationLambdaServiceRole")
+    assert {"health:DescribeAffectedAccountsForOrganization",
+            "health:DescribeAffectedEntitiesForOrganization"} <= actions, sorted(actions)

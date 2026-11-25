@@ -101,7 +101,7 @@ _MAX_DESCRIPTION_LEN = 32768
 # IMPL-026-04: validation patterns for Health API response fields
 _EVENT_ARN_PATTERN = re.compile(r"^arn:aws:health:[a-z0-9-]+::event/.+$")
 _ACCOUNT_ID_PATTERN = re.compile(r"^\d{12}$")
-_SERVICE_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
+_SERVICE_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")  # e.g. DEVOPS-GURU
 
 # IMPL-026-05: predefined error codes — never use raw str(e)
 _ERR_HEALTH_API_FAILED = "CONN_HEALTH_API_FAILED"
@@ -461,6 +461,51 @@ def _list_health_events(
     return events
 
 
+_ENTITY_FILTERS_PER_CALL = 10  # DescribeAffectedEntitiesForOrganization limit
+
+
+def _list_affected_accounts(event_arn: str) -> list:
+    """Accounts affected by an organizational event (DescribeAffectedAccountsForOrganization)."""
+    accounts: list = []
+    kw: dict[str, Any] = {"eventArn": event_arn}
+    while True:
+        resp = _health_client.describe_affected_accounts_for_organization(**kw)
+        for acct in resp.get("affectedAccounts", []):
+            if isinstance(acct, str) and _ACCOUNT_ID_PATTERN.match(acct) and acct not in accounts:
+                accounts.append(acct)
+        token = resp.get("nextToken")
+        if not token:
+            return accounts
+        kw["nextToken"] = token
+
+
+def _list_entities_for_accounts(event_arn: str, accounts: list) -> dict:
+    """Affected entities grouped by account.
+
+    The organizational API needs eventArn AND awsAccountId in each filter;
+    with eventArn alone it returns nothing and reports every request in
+    failedSet (InvalidAccountInputError).
+    """
+    by_account: dict = {a: [] for a in accounts}
+    failed: list = []
+    paginator = _health_client.get_paginator("describe_affected_entities_for_organization")
+    for i in range(0, len(accounts), _ENTITY_FILTERS_PER_CALL):
+        filters = [{"eventArn": event_arn, "awsAccountId": a}
+                   for a in accounts[i:i + _ENTITY_FILTERS_PER_CALL]]
+        for page in paginator.paginate(organizationEntityFilters=filters):
+            for entity in page.get("entities", []):
+                acct = entity.get("awsAccountId", "") if isinstance(entity, dict) else ""
+                if acct in by_account:
+                    by_account[acct].append(entity)
+            failed.extend(page.get("failedSet", []))
+    if failed:
+        logger.warning(
+            "Entity fetch partial failure — event_arn=%s failed_count=%d",
+            _sanitize_log(event_arn), len(failed),
+        )
+    return by_account
+
+
 def _list_entities_for_event(event_arn: str) -> tuple[list, list]:
     """Paginate DescribeAffectedEntitiesForOrganization for one event.
 
@@ -522,6 +567,7 @@ def _normalize_health_api_event(
     event: dict,
     entities: list,
     description: str,
+    affected_account: str = "",
 ) -> Optional[dict]:
     """Convert Health API response to internal event format.
 
@@ -555,9 +601,9 @@ def _normalize_health_api_event(
     if not isinstance(event_type_code, str) or not event_type_code.strip():
         return None
 
-    # Derive affectedAccount from first entity, or empty string
-    affected_account = ""
-    for entity in entities:
+    # affectedAccount: given by the caller (one detail per affected account),
+    # else derived from the first entity.
+    for entity in ([] if affected_account else entities):
         if isinstance(entity, dict):
             acct = entity.get("awsAccountId", "")
             if isinstance(acct, str) and _ACCOUNT_ID_PATTERN.match(acct):
@@ -875,35 +921,43 @@ def _process_single_event(
     config: dict,
     now: str,
 ) -> str:
-    """Process one Health API event through the core pipeline.
+    """Process one organizational Health event, once per affected account.
+
+    EventBridge delivers one event per affected account; reconciliation now
+    does the same, so routing, resources and tickets are per account.
 
     Returns: "ingested" | "updated" | "skipped"
     Raises on unrecoverable errors (caller catches per-event).
     """
     event_arn = health_event.get("arn", "")
+    accounts = _list_affected_accounts(event_arn)
+    if not accounts:
+        logger.info("No affected accounts — event_arn=%s", _sanitize_log(event_arn))
+        return "skipped"
+    entities_by_account = _list_entities_for_accounts(event_arn, accounts)
+    description = _get_event_description(event_arn, accounts[0])
 
-    # Fetch entities
-    entities, _ = _list_entities_for_event(event_arn)
-
-    # Fetch description — need an account ID for the API call
-    account_id = ""
-    for entity in entities:
-        if isinstance(entity, dict):
-            acct = entity.get("awsAccountId", "")
-            if isinstance(acct, str) and _ACCOUNT_ID_PATTERN.match(acct):
-                account_id = acct
-                break
-    description = _get_event_description(event_arn, account_id) if account_id else ""
-
-    # Normalize to internal format
-    detail = _normalize_health_api_event(health_event, entities, description)
-    if detail is None:
-        logger.warning(
-            "Event failed validation — error_code=%s event_arn=%s",
-            _ERR_EVENT_VALIDATION_FAILED, _sanitize_log(event_arn),
+    results = []
+    for account_id in accounts:
+        detail = _normalize_health_api_event(
+            health_event, entities_by_account.get(account_id, []), description,
+            affected_account=account_id,
         )
-        raise ValueError("Event failed validation")
+        if detail is None:
+            logger.warning(
+                "Event failed validation — error_code=%s event_arn=%s",
+                _ERR_EVENT_VALIDATION_FAILED, _sanitize_log(event_arn),
+            )
+            raise ValueError("Event failed validation")
+        results.append(_process_account_detail(detail, config, now))
+    for outcome in ("ingested", "updated"):
+        if outcome in results:
+            return outcome
+    return "skipped"
 
+
+def _process_account_detail(detail: dict, config: dict, now: str) -> str:
+    """Core pipeline for one (event, account) detail."""
     normalized_entities = detail.get("affectedEntities", [])
 
     # Filter INFORMATIONAL events
@@ -932,7 +986,7 @@ def _process_single_event(
     event_region = detail.get("region", "")
     is_new = campaign_result.action == "CREATED"
 
-    write_resources(
+    write_result = write_resources(
         resources_table=_resources_table,
         campaigns_table=_campaigns_table,
         campaign_id=campaign_id,
@@ -946,9 +1000,11 @@ def _process_single_event(
         stats_table=_stats_table,
     )
 
-    # SNS publish only for NEW campaigns that pass dispatch + routing
-    # (Design — existing campaigns already dispatched)
-    if is_new:
+    # Publish when the campaign is new, or this account is new to it (it wrote
+    # rows): in a merged campaign each account needs its own ticket. The ITSM
+    # handlers' duplicate checks make re-publishing safe.
+    account_added = getattr(write_result, "written", 0) > 0
+    if is_new or account_added:
         dispatch_result = _evaluate_dispatch_for_event(detail, config)
         if dispatch_result.get("dispatched") is True:
             routing_result = _resolve_routing_for_event(detail, config)
@@ -1002,7 +1058,7 @@ def _process_single_event(
             _update_campaign_dispatch(
                 campaign_id, False, dispatch_result, now,
             )
-        return "ingested"
+        return "ingested" if is_new else "updated"
 
     return "updated" if campaign_result.resource_count > 0 else "skipped"
 

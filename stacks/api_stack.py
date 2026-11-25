@@ -195,6 +195,7 @@ class ApiStack(cdk.Stack):
         self.reconciliation_fn.add_to_role_policy(iam.PolicyStatement(
             actions=[
                 "health:DescribeEventsForOrganization",
+                "health:DescribeAffectedAccountsForOrganization",
                 "health:DescribeAffectedEntitiesForOrganization",
                 "health:DescribeEventDetailsForOrganization",
             ],
