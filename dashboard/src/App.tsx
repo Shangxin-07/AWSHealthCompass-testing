@@ -15,6 +15,7 @@ import Campaigns from './Campaigns';
 import Configuration from './Configuration';
 import Testing from './Testing';
 import RoutingHealth from './RoutingHealth';
+import AlertApprovals from './AlertApprovals';
 import Login from './Login';
 import { APP_NAME, APP_PHASE } from './branding';
 
@@ -95,6 +96,7 @@ function AuthenticatedApp() {
               ]},
               { type: 'section', text: APP_NAME, items: [
                 { type: 'link', text: `Campaigns (${activeCampaigns.length})`, href: '#/campaigns' },
+                { type: 'link', text: 'Alert Approvals', href: '#/alert-approvals' },
                 { type: 'link', text: 'Routing Health', href: '#/routing-health' },
               ]},
               { type: 'section', text: 'Settings', items: [
@@ -111,6 +113,7 @@ function AuthenticatedApp() {
             <Flashbar items={flash} />
             {page === 'dashboard' && <Dashboard campaigns={campaigns} config={config} onRefresh={loadCampaigns} notify={notify} onNavigate={setPage} onSync={syncAll} onSplitPanelChange={onSplitPanelChange} />}
             {page === 'campaigns' && <Campaigns campaigns={activeCampaigns} config={config} onRefresh={loadCampaigns} notify={notify} onSync={syncAll} onSplitPanelChange={onSplitPanelChange} />}
+            {page === 'alert-approvals' && <AlertApprovals isAdmin={isAdmin} notify={notify} />}
             {page === 'routing-health' && <RoutingHealth />}
             {page === 'configuration' && <Configuration config={config} onSave={() => { loadConfig(); notify('success', 'Configuration saved'); }} />}
             {page === 'testing' && isAdmin && <Testing />}

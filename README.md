@@ -246,6 +246,14 @@ For full JIRA setup, see [`docs/JIRA_SETUP.md`](docs/JIRA_SETUP.md).
 - OAuth 2.0 authentication for enterprise ServiceNow instances
 - ServiceNow ticket execution is verified working (one change request per campaign by default). Some enhancements — per-resource status write-back detail, CSV attachment, and CMDB-based routing — are not yet delivered; see [`docs/SERVICENOW_SETUP.md`](docs/SERVICENOW_SETUP.md) for the current state.
 
+### Alert Approvals (ITSM whitelist)
+
+- **Compass → Alert Approvals** lists every AWS Health alert type seen (event type code + category) with its campaigns, held-back campaigns, accounts, resources and accounts still without a ticket.
+- **Whitelist on** sets the Dispatch Window to `custom`: only approved alert types create tickets. Everything else is still recorded and visible in Compass, held back as `FILTERED`. **Off** sets it back to `all`.
+- **Approve** writes an exact-match `DISPATCH_RULE#approved-*` rule (recording who approved and when); **Revoke** disables it. New alert types always start as Pending. Changes reach the Processor within about 5 minutes (config cache). Prefix rules added in the Dispatch Window settings also count as approvals.
+- Approving affects **new** events only. **Send now** sends an approved type's already-recorded campaigns, after showing how many campaigns and tickets it will create; accounts that already have a ticket are skipped. At most 50 campaigns per send.
+- Changes are Admin-only; Viewers see the list read-only. At most 100 enabled rules (revoked rules don't count).
+
 ### Bidirectional Sync
 
 - Hourly poll of JIRA via batch JQL search, or ServiceNow status polling

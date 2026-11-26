@@ -214,6 +214,10 @@ def load_dispatch_config(config_table: Any) -> dict:
     while True:
         resp = config_table.scan(**scan_kwargs)
         for item in resp.get("Items", []):
+            # Disabled (e.g. revoked) rules never match; leaving them out keeps
+            # them from counting against the cap below.
+            if not item.get("enabled", False):
+                continue
             rules.append({
                 "rule_id": item.get("rule_id", ""),
                 "event_type_pattern": item.get("event_type_pattern", ""),

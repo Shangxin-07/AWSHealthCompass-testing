@@ -848,6 +848,12 @@ class ApiStack(cdk.Stack):
         api_root.add_resource("system").add_resource("status").add_method("GET", integration, **auth_opts)
         api_root.add_resource("accounts").add_method("GET", integration, **auth_opts)
 
+        # Alert Approvals (whitelist of Health alert types sent to the ITSM)
+        alerts = api_root.add_resource("alerts")
+        alerts.add_method("GET", integration, **auth_opts)
+        for action in ("whitelist", "approve", "revoke", "send"):
+            alerts.add_resource(action).add_method("POST", integration, **auth_opts)
+
         test_resource = api_root.add_resource("test")
         test_resource.add_resource("route").add_method("POST", integration, **auth_opts)
         test_resource.add_resource("resource-status").add_method("POST", integration, **auth_opts)

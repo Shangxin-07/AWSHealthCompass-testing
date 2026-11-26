@@ -956,6 +956,22 @@ try:
 except ImportError:
     from lambdas.api.status_handlers import handle_accounts_summary, handle_system_status  # noqa: E402
 
+try:
+    from alert_handlers import (  # noqa: E402
+        handle_alerts_approve, handle_alerts_list, handle_alerts_revoke,
+        handle_alerts_send, handle_alerts_whitelist,
+    )
+except ImportError:
+    from lambdas.api.alert_handlers import (  # noqa: E402
+        handle_alerts_approve, handle_alerts_list, handle_alerts_revoke,
+        handle_alerts_send, handle_alerts_whitelist,
+    )
+
+_ROUTES[("GET", "/api/alerts")] = handle_alerts_list
+_ROUTES[("POST", "/api/alerts/whitelist")] = handle_alerts_whitelist
+_ROUTES[("POST", "/api/alerts/approve")] = handle_alerts_approve
+_ROUTES[("POST", "/api/alerts/revoke")] = handle_alerts_revoke
+_ROUTES[("POST", "/api/alerts/send")] = handle_alerts_send
 _ROUTES[("GET", "/api/system/status")] = handle_system_status
 _ROUTES[("GET", "/api/accounts")] = handle_accounts_summary
 
