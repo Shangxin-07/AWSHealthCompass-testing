@@ -671,8 +671,10 @@ def handle_create_tickets(event, context):
                     {
                         "arn": r.get("resourceArn", r.get("entityValue", "")),
                         "entityValue": r.get("entityValue", ""),
+                        "trackingKey": r.get("trackingKey", ""),
                         "accountId": r.get("accountId", ""),
-                        "status": r.get("status", "PENDING"),
+                        # Rows store healthStatus; "status" is a legacy field name.
+                        "status": r.get("healthStatus") or r.get("status", "PENDING"),
                         "lastUpdatedTime": r.get("lastUpdatedTime", ""),
                         "resourceTags": r.get("resourceTags", {}),
                     }
